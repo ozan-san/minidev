@@ -115,7 +115,7 @@ Requires OpenRouter credentials in pi (`/login openrouter` or `OPENROUTER_API_KE
 ## Development
 
 ```bash
-npm install --legacy-peer-deps   # dev tools only; pi's packages come from the host pi
+npm ci                           # dev tools only (.npmrc skips peer deps; pi provides them)
 npm run typecheck                # finds your pi install at runtime (or set PI_NODE_MODULES)
 ```
 
