@@ -9,7 +9,8 @@
     "extensions": ["./extensions/minidev/index.ts"]
   },
   "scripts": {
-    "typecheck": "node scripts/typecheck.mjs"
+    "typecheck": "node scripts/typecheck.mjs",
+    "test": "node --test 'extensions/**/*.test.ts'"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
