@@ -36,9 +36,5 @@ jobs:
           node-version: "22.18"
           cache: npm
       - run: npm ci
-      - name: Install pi peer packages (not saved to lockfile)
-        run: npm install --no-save @earendil-works/pi-coding-agent@1 @earendil-works/pi-tui@1
       - name: Typecheck
         run: npm run -s typecheck
-        env:
-          PI_NODE_MODULES: ${{ github.workspace }}/node_modules
