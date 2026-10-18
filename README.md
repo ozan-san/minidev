@@ -68,6 +68,7 @@ switch branches or write outside the worktree. The orchestrator owns git.
 | `/minidev approve [KEY]` | approve a pending plan/PR gate and continue (useful headless) |
 | `/minidev stop` | stop the active run (kills subagents; resumable) |
 | `/minidev status` | runs for this repo |
+| `/minidev journal [KEY]` | show a run's durable journal (agent submissions, replays, checkpoints) |
 | `/minidev detect` | show the mode, setup and checks minidev would use here |
 | `/minidev ui [show\|hide\|toggle\|details]` | show/hide the live panel or open the details overlay |
 | `/minidev models` | pick model + thinking per role (default or "this run only"); applies from the next call |
@@ -86,10 +87,21 @@ every model turn; when the cap is hit the running subagent is killed and the run
 `/minidev resume`). Overshoot is at most one model turn. Optional per-role cap: `models.<role>.maxUsdPerCall`.
 Warning at `budget.warnAt` (80%).
 
+## Durability
+
+Every run writes an append-only `journal.jsonl` under its run directory. Each agent invocation gets a
+deterministic `requestId` and an input hash; when a run is resumed after a pause or crash, a successful
+recorded call with the same id and hash is **replayed** from the journal instead of re-spawned. Leftover
+subagent processes from an interrupted run are killed before resuming. Two knobs control this: `durable.replay`
+(`"safe"` | `"off"`) and `durable.reapOrphans` (`boolean`). Replay is skipped when the task, system prompt or
+model changed (the input hash differs). This follows the durable-task / exactly-once / replay approach of the
+linked `@earendil-works/pi-durable` post but is implemented natively, with no extra dependency.
+
 ## Config
 
 `defaults ← ~/.minidev/config.json ← <repo>/.minidev.json` (deep merge). See [`minidev.example.json`](minidev.example.json).
-Model refs are anything `pi --model` accepts (`pi --list-models <search>`).
+Model refs are anything `pi --model` accepts (`pi --list-models <search>`). The `durable` block can be set in
+`~/.minidev/config.json` or `<repo>/.minidev.json`.
 
 ## Agent prompts
 
@@ -110,7 +122,8 @@ Keep the output format sections of the role contracts intact; the orchestrator p
 ## Artifacts
 
 `~/.minidev/runs/<repo>/<KEY>/`: `ticket.md`, `context.md`, `plan.md`, `plan.json`, `test-report.md`, `review.md`,
-`pr-body.md`, `state.json`, `logs/*.log` (check output), `agents/*.jsonl` (full subagent transcripts + prompts).
+`pr-body.md`, `state.json`, `journal.jsonl` (durable journal: agent submissions, replays, checkpoints),
+`logs/*.log` (check output), `agents/*.jsonl` (full subagent transcripts + prompts).
 
 ## Install
 
@@ -150,6 +163,7 @@ extensions/minidev/
   ticket.ts     ticket sources (manual, file; Jira slot)
   ui-model.ts   pure widget/detail renderers + formatting (unit-tested)
   config.ts state.ts ui.ts agents.ts util.ts
+  durable.ts    durable journal: request ids, replay, checkpoints, orphan reaping
 agents/         role contracts (scout, planner, builder, tester, reviewer)
 agents/stacks/  per-mode guidance (android, ios, typescript, generic)
 guard/guard.ts  safety extension loaded into every subagent
@@ -160,3 +174,4 @@ guard/guard.ts  safety extension loaded into every subagent
 - Jira source (Atlassian MCP or REST) → `SOURCES` in `ticket.ts`
 - Parallel builders for independent subtasks (separate worktrees)
 - Emulator/instrumented tests stage
+- Optionally back the journal with the experimental `@earendil-works/pi-durable` harness (tasks/checkpoints/storage adapters).
