@@ -8,7 +8,7 @@
  *   /minidev journal [KEY]                         show a run's durable journal
  *   /minidev stop                                  stop the active run (resumable)
  *   /minidev detect                                show which mode (stack) minidev picks for this repo
- *   /minidev ui [show|hide|toggle|details]         show, hide or inspect the run panel
+ *   /minidev ui [show|hide|toggle|details|dismiss]    show, hide, dismiss or inspect the run panel
  *   /minidev models [role model[:thinking]]        show / change per-role models
  *   /minidev budget <usd> [default]                change the active run's (or default) budget
  *   /minidev clean <KEY>                           remove a run's worktree
@@ -89,6 +89,7 @@ export default function minidev(pi: ExtensionAPI) {
 		const pipeline = new Pipeline(state, { pi, ctx, dash, signal: controller.signal });
 		const done = pipeline.run().finally(() => {
 			if (active?.state === state) active = undefined;
+			if (dashboard === dash && !dash.isAttached) dashboard = undefined;
 		});
 		active = { state, controller, done };
 		return done;
@@ -322,6 +323,10 @@ export default function minidev(pi: ExtensionAPI) {
 			case "hide":
 				dash.hide();
 				return ctx.ui.notify("minidev: panel hidden — /minidev ui shows it again", "info");
+			case "dismiss":
+				dash.dismiss();
+				dashboard = undefined;
+				return ctx.ui.notify("minidev: panel dismissed — start a run to bring it back", "info");
 			case "show":
 				dash.show();
 				return;
@@ -334,7 +339,7 @@ export default function minidev(pi: ExtensionAPI) {
 				return ctx.ui.notify(visible ? "minidev: panel shown" : "minidev: panel hidden", "info");
 			}
 			default:
-				return ctx.ui.notify("minidev ui: show | hide | toggle | details", "warning");
+				return ctx.ui.notify("minidev ui: show | hide | toggle | details | dismiss", "warning");
 		}
 	}
 
@@ -345,7 +350,7 @@ export default function minidev(pi: ExtensionAPI) {
 		getArgumentCompletions: (prefix) => {
 			const parts = prefix.split(/\s+/);
 			if (parts.length <= 1) return SUBCOMMANDS.filter((s) => s.startsWith(parts[0] ?? "")).map((s) => ({ value: s, label: s }));
-			if (parts[0] === "ui" && parts.length === 2) return ["show", "hide", "toggle", "details"].filter((o) => o.startsWith(parts[1] ?? "")).map((o) => ({ value: `ui ${o}`, label: o }));
+			if (parts[0] === "ui" && parts.length === 2) return ["show", "hide", "toggle", "details", "dismiss"].filter((o) => o.startsWith(parts[1] ?? "")).map((o) => ({ value: `ui ${o}`, label: o }));
 			if (parts[0] === "models" && parts.length === 2) return ROLES.filter((r) => r.startsWith(parts[1])).map((r) => ({ value: `models ${r}`, label: r }));
 			return null;
 		},
