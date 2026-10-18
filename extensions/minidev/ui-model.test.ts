@@ -239,7 +239,7 @@ describe("renderWidget", () => {
 			makeView({ state: makeState({ status: "running" }), version: "v0.1.0 (abc1234)" }),
 			theme,
 		);
-		const header = out[0];
+		const header = out[1];
 		assert.ok(header.includes("minidev"));
 		assert.ok(header.includes("MD-1"));
 		assert.ok(header.includes("Better UI"));
@@ -248,13 +248,13 @@ describe("renderWidget", () => {
 	});
 
 	test("header omits the version label when unset", () => {
-		const header = renderWidget(makeView({ state: makeState({ status: "running" }) }), theme)[0];
+		const header = renderWidget(makeView({ state: makeState({ status: "running" }) }), theme)[1];
 		assert.ok(!header.includes("v0.1.0"));
 	});
 
 	test("pipeline line contains every stage", () => {
 		const out = renderWidget(makeView(), theme);
-		const pipeline = out[1];
+		const pipeline = out[2];
 		for (const stage of ["workspace", "detect", "scout", "plan", "build", "test", "review", "pr"]) {
 			assert.ok(pipeline.includes(stage), `missing ${stage}`);
 		}
@@ -327,11 +327,11 @@ describe("renderWidget", () => {
 });
 
 describe("renderDetail", () => {
-	test("first line includes the version label", () => {
+	test("header line includes the version label", () => {
 		const out = renderDetail(makeView({ version: "v0.1.0 (abc1234)" }), theme);
-		assert.ok(out[0].includes("minidev"));
-		assert.ok(out[0].includes("v0.1.0 (abc1234)"));
-		assert.ok(out[0].includes("MD-1"));
+		assert.ok(out[1].includes("minidev"));
+		assert.ok(out[1].includes("v0.1.0 (abc1234)"));
+		assert.ok(out[1].includes("MD-1"));
 	});
 
 	test("includes Subtasks, Agents, Checks and Activity sections", () => {

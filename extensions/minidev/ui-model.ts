@@ -217,7 +217,7 @@ export function renderWidget(v: DashboardView, th: Theme): string[] {
 	}
 
 	if (s.prUrl) out.push(`${th.fg("success", "PR")} ${s.prUrl}`);
-	return out;
+	return frameLines(out, th, { color: STAGE_COLORS[s.stage], width: v.width });
 }
 
 export function renderDetail(v: DashboardView, th: Theme): string[] {
@@ -324,7 +324,7 @@ export function renderDetail(v: DashboardView, th: Theme): string[] {
 	if (s.prUrl) out.push(`  ${th.fg("dim", s.prUrl)}`);
 
 	out.push("", th.fg("dim", "esc close · ↑/↓ line · pgUp/pgDn page"));
-	return out;
+	return frameLines(out, th, { color: STAGE_COLORS[s.stage], width: v.width });
 }
 
 export function agentSummary(
