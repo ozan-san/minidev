@@ -77,9 +77,11 @@ export class Dashboard {
 	private visible = true;
 	private attached = false;
 	private ctx: ExtensionContext;
+	private version?: string;
 
-	constructor(ctx: ExtensionContext) {
+	constructor(ctx: ExtensionContext, version?: string) {
 		this.ctx = ctx;
+		this.version = version;
 	}
 
 	get isVisible(): boolean {
@@ -241,6 +243,7 @@ export class Dashboard {
 			startedStage: this.startedStage,
 			waitingSince: this.waitingSince,
 			now: Date.now(),
+			version: this.version,
 		};
 	}
 
