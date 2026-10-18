@@ -118,6 +118,32 @@ interface FinalizeArgs {
 	aborted: boolean;
 }
 
+/** A failed `RunAgentResult` with no output, cost or turns — the shape every early failure path returns. */
+function failedResult(model: string, transcript: string, error: string): RunAgentResult {
+	return { ok: false, output: "", costUsd: 0, turns: 0, model, error, budgetExceeded: false, aborted: false, transcript };
+}
+
+/** Blank ledger record for one attempt; callers override the fields they know. */
+function blankCall(o: RunAgentOptions, base: string, attempt: number, usageBase: number): CallRecord {
+	return {
+		requestId: base,
+		inputHash: o.inputHash,
+		attempt,
+		status: "running",
+		ok: false,
+		submissionId: null,
+		output: null,
+		costUsd: 0,
+		turns: 0,
+		model: null,
+		stopReason: null,
+		error: null,
+		transcript: null,
+		usageBase,
+		at: Date.now(),
+	};
+}
+
 /** The ledger stores submission ids as strings (strict JSON); pi-durable ids are branded numbers. */
 function storedId(id: SubmissionId): string {
 	return String(id);
@@ -273,9 +299,7 @@ export class AgentHarness {
 		fs.writeFileSync(transcript, lines.length ? `${lines.join("\n")}\n` : "", "utf-8");
 
 		await this.writeCall({
-			requestId: base,
-			inputHash: o.inputHash,
-			attempt,
+			...blankCall(o, base, attempt, usageBase),
 			status: "settled",
 			ok,
 			submissionId: storedId(submissionId),
@@ -286,7 +310,6 @@ export class AgentHarness {
 			stopReason: stopReason ?? null,
 			error: error ?? null,
 			transcript,
-			usageBase,
 			at: Date.now(),
 		});
 
@@ -315,17 +338,7 @@ export class AgentHarness {
 		const ref = resolveModelRef(this.registryLike, o.model.model);
 		if (!ref) {
 			fs.writeFileSync(transcript, "", "utf-8");
-			return {
-				ok: false,
-				output: "",
-				costUsd: 0,
-				turns: 0,
-				model: o.model.model,
-				error: `model not available: ${o.model.model}`,
-				budgetExceeded: false,
-				aborted: false,
-				transcript,
-			};
+			return failedResult(o.model.model, transcript, `model not available: ${o.model.model}`);
 		}
 
 		const base = callKey(o.requestId, o.inputHash);
@@ -368,23 +381,7 @@ export class AgentHarness {
 			// A fresh attempt: baseline the usage, reset+configure the conversation, then admit the task durably.
 			usageBase = totalCost(await this.harness.usage(BACKGROUND_CONTEXT));
 			await this.prepare(o, ref);
-			const running: CallRecord = {
-				requestId: base,
-				inputHash: o.inputHash,
-				attempt,
-				status: "running",
-				ok: false,
-				submissionId: null,
-				output: null,
-				costUsd: 0,
-				turns: 0,
-				model: null,
-				stopReason: null,
-				error: null,
-				transcript: null,
-				usageBase,
-				at: Date.now(),
-			};
+			const running = blankCall(o, base, attempt, usageBase);
 			await this.writeCall(running);
 			const submitted = await (await this.root()).submit(
 				{ type: "input", content: o.task, requestId: attemptRequestId(base, attempt) },
@@ -398,33 +395,14 @@ export class AgentHarness {
 		if (!submission) {
 			const error = `submission not found: ${storedId(submissionId)}`;
 			await this.writeCall({
-				requestId: base,
-				inputHash: o.inputHash,
-				attempt,
+				...blankCall(o, base, attempt, usageBase),
 				status: "settled",
-				ok: false,
-				submissionId: storedId(submissionId),
-				output: "",
-				costUsd: 0,
-				turns: 0,
-				model: o.model.model,
-				stopReason: null,
 				error,
+				output: "",
+				model: o.model.model,
 				transcript,
-				usageBase,
-				at: Date.now(),
 			});
-			return {
-				ok: false,
-				output: "",
-				costUsd: 0,
-				turns: 0,
-				model: o.model.model,
-				error,
-				budgetExceeded: false,
-				aborted: false,
-				transcript,
-			};
+			return failedResult(o.model.model, transcript, error);
 		}
 
 		const stream = await watchEvents(this.harness, (await this.root()).id, BACKGROUND_CONTEXT);

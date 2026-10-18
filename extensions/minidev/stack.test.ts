@@ -36,6 +36,19 @@ function check(name: string, command = name): Check {
 	return { name, command };
 }
 
+/** Temp git repo with the given files staged, so `git ls-files` sees them. */
+async function tempRepo(files: Record<string, string> = {}): Promise<string> {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "minidev-stack-"));
+	await git(dir, ["init"]);
+	for (const [rel, content] of Object.entries(files)) {
+		const abs = path.join(dir, rel);
+		fs.mkdirSync(path.dirname(abs), { recursive: true });
+		fs.writeFileSync(abs, content);
+	}
+	await git(dir, ["add", "."]);
+	return dir;
+}
+
 describe("effectiveChecks", () => {
 	const stackChecks: Checks = { subtask: [check("stack-sub")], final: [check("stack-final")] };
 	const perStackChecks: Checks = { subtask: [check("per-sub")], final: [check("per-final")] };
@@ -181,6 +194,57 @@ describe("detectStack", () => {
 				stack.facts.some((f) => /CI config .*github\/workflows\/ci\.yml/.test(f)),
 				`no CI fact in: ${stack.facts.join(" | ")}`,
 			);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("detectStack profiles", () => {
+	const pkg = JSON.stringify({ name: "x", scripts: { typecheck: "tsc --noEmit", test: "node --test" } });
+
+	async function detect(files: Record<string, string>) {
+		const dir = await tempRepo(files);
+		try {
+			return await detectStack(dir, { forced: "typescript", derivedData: dir });
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	}
+
+	test("uses npm ci when package-lock.json is present", async () => {
+		const stack = await detect({ "package.json": pkg, "package-lock.json": "{}" });
+		assert.deepEqual(stack.setup, ["npm ci"]);
+	});
+
+	test("uses the frozen pnpm install when pnpm-lock.yaml is present", async () => {
+		const stack = await detect({ "package.json": pkg, "pnpm-lock.yaml": "lockfileVersion: 9" });
+		assert.deepEqual(stack.setup, ["pnpm install --frozen-lockfile"]);
+	});
+
+	test("uses the frozen bun install when bun.lock is present", async () => {
+		const stack = await detect({ "package.json": pkg, "bun.lock": "{}" });
+		assert.deepEqual(stack.setup, ["bun install --frozen-lockfile"]);
+	});
+
+	test("falls back to npm install without a lockfile", async () => {
+		const stack = await detect({ "package.json": pkg });
+		assert.deepEqual(stack.setup, ["npm install"]);
+	});
+
+	test("maps npm scripts to the typecheck subtask and the final test command", async () => {
+		const stack = await detect({ "package.json": pkg, "package-lock.json": "{}" });
+		assert.deepEqual(stack.checks.subtask, [{ name: "typecheck", command: "npm run -s typecheck", timeoutSec: 900 }]);
+		assert.ok(stack.checks.final.some((c) => c.command === "CI=1 npm run -s test"));
+	});
+
+	test("forced android resolves to the Android profile checks", async () => {
+		const dir = await tempRepo();
+		try {
+			const stack = await detectStack(dir, { forced: "android", derivedData: dir });
+			assert.equal(stack.id, "android");
+			assert.ok(stack.checks.subtask.some((c) => c.command.includes("assembleDebug")));
+			assert.ok(stack.checks.final.some((c) => c.command.includes("assembleDebug")));
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

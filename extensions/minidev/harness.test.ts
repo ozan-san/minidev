@@ -79,4 +79,33 @@ describe("AgentHarness", () => {
 		assert.ok(fs.existsSync(sessionDir(dir)), "expected the JSONL session directory to exist");
 		await harness.close();
 	});
+
+	test("a missing model fails fast without touching the ledger", async () => {
+		const dir = runDir("missing-model");
+		const harness = await AgentHarness.open({ runDir: dir, registry: emptyRegistry });
+		const r = await harness.run({
+			agent: { name: "builder", description: "", tools: [], systemPrompt: "sys", sources: [] },
+			model: { model: "nope/missing" },
+			task: "t",
+			cwd: dir,
+			workDir: dir,
+			label: "01-test",
+			requestId: "r",
+			inputHash: "h",
+			replay: false,
+			maxUsd: 1,
+		});
+		assert.equal(r.ok, false);
+		assert.equal(r.output, "");
+		assert.equal(r.costUsd, 0);
+		assert.equal(r.turns, 0);
+		assert.equal(r.model, "nope/missing");
+		assert.match(r.error ?? "", /model not available/);
+		assert.equal(r.budgetExceeded, false);
+		assert.equal(r.aborted, false);
+		assert.equal(r.transcript, path.join(dir, "01-test.jsonl"));
+		assert.equal(fs.readFileSync(r.transcript, "utf-8"), "");
+		assert.deepEqual(await harness.readCalls(), []);
+		await harness.close();
+	});
 });

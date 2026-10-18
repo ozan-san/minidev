@@ -7,7 +7,7 @@ import * as ST from "./stack.ts";
 import { loadConfig, type Config, type Role, type RoleModel } from "./config.ts";
 import * as G from "./git.ts";
 import * as P from "./prompts.ts";
-import { agentHarness, type AgentHarness, type RunAgentResult } from "./harness.ts";
+import { agentHarness, type AgentHarness, type RunnerEvent, type RunAgentResult } from "./harness.ts";
 import { inputHash, requestIdFor } from "./harness-util.ts";
 import { artifact, saveState, STAGES, type PlanJson, type Review, type RunState, type Stage, type Subtask } from "./state.ts";
 import { ticketMarkdown } from "./ticket.ts";
@@ -17,8 +17,11 @@ import { exec, extractJson, fmtUsd, sh, shellQuote, slugify, stripJsonBlocks, wr
 
 /** Stops the run but keeps it resumable. */
 export class Pause extends Error {
-	constructor(public reason: string) {
+	reason: string;
+
+	constructor(reason: string) {
 		super(reason);
+		this.reason = reason;
 	}
 }
 
@@ -51,12 +54,13 @@ function guessType(title: string): string {
 export class Pipeline {
 	private cfg: Config;
 	private warned = false;
+	private s: RunState;
+	private d: PipelineDeps;
 	private agentRuntime?: Promise<AgentHarness>;
 
-	constructor(
-		private s: RunState,
-		private d: PipelineDeps,
-	) {
+	constructor(s: RunState, d: PipelineDeps) {
+		this.s = s;
+		this.d = d;
 		this.cfg = loadConfig(s.repoRoot);
 	}
 
@@ -83,6 +87,45 @@ export class Pipeline {
 	private agentHarness(): Promise<AgentHarness> {
 		this.agentRuntime ??= agentHarness({ runDir: this.s.runDir, registry: this.d.ctx.modelRegistry });
 		return this.agentRuntime;
+	}
+
+	/** Forward harness events to the dashboard, tracking live cost. */
+	private agentSink(baseCost: number, fallbackModel: string): (e: RunnerEvent) => void {
+		return (e) => {
+			const dash = this.d.dash;
+			if (e.type === "tool") dash.push(e.summary, "tool");
+			else if (e.type === "retry") dash.push(e.message, "retry");
+			else if (e.type === "text") dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
+			else if (e.type === "usage") {
+				this.s.costUsd = baseCost + e.costUsd;
+				dash.agentUpdate({ costUsd: e.costUsd, turns: e.turns, model: e.model ?? fallbackModel });
+			}
+		};
+	}
+
+	/** Account a finished agent call's cost and append it to the run ledger. */
+	private recordAgentRun(role: Role, label: string, startedAt: number, baseCost: number, r: RunAgentResult): void {
+		// A replayed call's spend was already counted when it first ran.
+		this.s.costUsd = baseCost + (r.replayed ? 0 : r.costUsd);
+		this.s.agentRuns.push({
+			role, label, model: r.model, costUsd: r.costUsd, turns: r.turns, ok: r.ok, startedAt, endedAt: Date.now(), transcript: r.transcript,
+		});
+		this.save();
+	}
+
+	/** Notify once when spend crosses the configured warning threshold. */
+	private warnIfOverBudget(): void {
+		const frac = this.s.costUsd / this.s.budgetUsd;
+		if (this.warned || frac < this.cfg.budget.warnAt) return;
+		this.warned = true;
+		this.notify(`Budget ${Math.round(frac * 100)}% used (${fmtUsd(this.s.costUsd)} of ${fmtUsd(this.s.budgetUsd)})`, "warning");
+	}
+
+	/** Map an aborted or over-budget call onto a `Pause`. */
+	private assertAgentRan(r: RunAgentResult, role: Role, maxUsd: number): RunAgentResult {
+		if (r.aborted) throw new Pause("stopped");
+		if (r.budgetExceeded) throw new Pause(this.s.costUsd >= this.s.budgetUsd ? "budget" : `per-call cap for ${role} (${fmtUsd(maxUsd)})`);
+		return r;
 	}
 
 	private async agent(role: Role, label: string, task: string): Promise<RunAgentResult> {
@@ -117,42 +160,12 @@ export class Pipeline {
 			replay: this.cfg.durable.replay === "safe",
 			signal: this.d.signal,
 			maxUsd,
-			onEvent: (e) => {
-				if (e.type === "tool") this.d.dash.push(e.summary, "tool");
-				else if (e.type === "retry") this.d.dash.push(e.message, "retry");
-				else if (e.type === "text") this.d.dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
-				else if (e.type === "usage") {
-					this.s.costUsd = baseCost + e.costUsd;
-					this.d.dash.agentUpdate({ costUsd: e.costUsd, turns: e.turns, model: e.model ?? model.model });
-				}
-			},
+			onEvent: this.agentSink(baseCost, model.model),
 		});
 		this.d.dash.agentEnd();
-		// A replayed call's spend was already counted when it first ran.
-		this.s.costUsd = baseCost + (r.replayed ? 0 : r.costUsd);
-		this.s.agentRuns.push({
-			role,
-			label,
-			model: r.model,
-			costUsd: r.costUsd,
-			turns: r.turns,
-			ok: r.ok,
-			startedAt,
-			endedAt: Date.now(),
-			transcript: r.transcript,
-		});
-		this.save();
-
-		const frac = this.s.costUsd / this.s.budgetUsd;
-		if (!this.warned && frac >= this.cfg.budget.warnAt) {
-			this.warned = true;
-			this.notify(`Budget ${Math.round(frac * 100)}% used (${fmtUsd(this.s.costUsd)} of ${fmtUsd(this.s.budgetUsd)})`, "warning");
-		}
-		if (r.aborted) throw new Pause("stopped");
-		if (r.budgetExceeded) {
-			throw new Pause(this.s.costUsd >= this.s.budgetUsd ? "budget" : `per-call cap for ${role} (${fmtUsd(maxUsd)})`);
-		}
-		return r;
+		this.recordAgentRun(role, label, startedAt, baseCost, r);
+		this.warnIfOverBudget();
+		return this.assertAgentRan(r, role, maxUsd);
 	}
 
 	private notify(msg: string, type: "info" | "warning" | "error" = "info"): void {
@@ -444,38 +457,44 @@ export class Pipeline {
 		this.save();
 	}
 
+	/** Run the builder on `t` up to `limits.subtaskAttempts` times; returns the failure report, or undefined when its blocking checks pass. */
+	private async runSubtaskAttempts(t: Subtask, resumed: boolean): Promise<string | undefined> {
+		let failure: string | undefined;
+		for (let i = 0; i < this.cfg.limits.subtaskAttempts; i++) {
+			t.attempts++;
+			this.save();
+			const r = await this.agent(
+				"builder",
+				`build-${t.id}${t.attempts > 1 ? `-try${t.attempts}` : ""}`,
+				P.builderSubtaskTask(this.s, this.cfg, t, failure, resumed && i === 0),
+			);
+			t.summary = r.output;
+			if (!r.ok) {
+				failure = `The builder process ended with an error: ${r.error}`;
+				continue;
+			}
+			const res = await this.checks("subtask", `${t.id}-try${t.attempts}`);
+			if (res.every((c) => c.ok || !c.blocking)) return undefined;
+			failure = failuresReport(res);
+		}
+		return failure;
+	}
+
 	private async build(): Promise<void> {
 		const s = this.s;
-		const lim = this.cfg.limits;
 		for (const t of s.subtasks) {
 			if (t.status === "done") continue;
 			const resumed = t.attempts > 0 && (await G.hasChanges(this.wt));
 			t.status = "running";
 			this.save();
-			let failure: string | undefined;
 			let ok = false;
 			while (!ok) {
-				for (let i = 0; i < lim.subtaskAttempts && !ok; i++) {
-					t.attempts++;
-					this.save();
-					const r = await this.agent(
-						"builder",
-						`build-${t.id}${t.attempts > 1 ? `-try${t.attempts}` : ""}`,
-						P.builderSubtaskTask(s, this.cfg, t, failure, resumed && i === 0),
-					);
-					t.summary = r.output;
-					if (!r.ok) {
-						failure = `The builder process ended with an error: ${r.error}`;
-						continue;
-					}
-					const res = await this.checks("subtask", `${t.id}-try${t.attempts}`);
-					if (res.every((c) => c.ok || !c.blocking)) ok = true;
-					else failure = failuresReport(res);
-				}
+				const failure = await this.runSubtaskAttempts(t, resumed);
+				ok = failure === undefined;
 				if (ok) break;
 				const pick = await this.choose(
 					`${t.id} "${t.title}" still failing after ${t.attempts} attempts`,
-					[`Retry ${lim.subtaskAttempts} more times`, "Accept as-is & continue", "Pause"],
+					[`Retry ${this.cfg.limits.subtaskAttempts} more times`, "Accept as-is & continue", "Pause"],
 					"Pause",
 				);
 				if (pick === "Pause") {
@@ -586,6 +605,39 @@ export class Pipeline {
 		return "";
 	}
 
+	/** The push gate: whether to push and whether to open the PR. Throws Pause when the user keeps the branch local. */
+	private async prDecision(title: string, hasCommand: boolean): Promise<{ openPr: boolean; pushOnly: boolean }> {
+		if (!this.cfg.gates.pr || this.s.prApproved) return { openPr: this.cfg.pr.push, pushOnly: false };
+		if (!this.d.ctx.hasUI) throw new Pause("awaiting PR approval");
+		const opts = hasCommand ? ["Push & open PR", "Push only", "Keep local (pause)"] : ["Push", "Keep local (pause)"];
+		const pick = await this.choose(`${title} — total ${fmtUsd(this.s.costUsd)}`, opts, "Keep local (pause)");
+		if (pick.startsWith("Keep local")) throw new Pause("awaiting PR approval");
+		return { openPr: pick === "Push & open PR", pushOnly: !pick.startsWith("Push &") };
+	}
+
+	private async pushBranch(): Promise<void> {
+		this.d.dash.setNote(`git push ${this.cfg.git.remote} ${this.s.branch}`);
+		await G.push(this.wt, this.cfg.git.remote, this.s.branch as string);
+		this.s.pushed = true;
+		this.save();
+	}
+
+	private async openPr(title: string, bodyFile: string, cmdTemplate: string): Promise<void> {
+		const cmd = fill(cmdTemplate, {
+			title: shellQuote(title),
+			bodyFile: shellQuote(bodyFile),
+			base: shellQuote(this.s.base as string),
+			branch: shellQuote(this.s.branch as string),
+			remote: shellQuote(this.cfg.git.remote),
+			draft: this.cfg.pr.draft ? "--draft" : "",
+		});
+		this.d.dash.setNote("opening PR");
+		const r = await sh(cmd, { cwd: this.wt, timeoutMs: 120_000 });
+		if (r.code !== 0) throw new Error(`PR command failed: ${(r.stderr || r.stdout).trim()}\nCommand: ${cmd}`);
+		this.s.prUrl = /(https?:\/\/\S+)/.exec(r.stdout)?.[1] ?? r.stdout.trim();
+		this.save();
+	}
+
 	private async pr(): Promise<void> {
 		const s = this.s;
 		if (await G.hasChanges(this.wt)) await this.commit(`${s.key}: remaining changes`);
@@ -603,39 +655,15 @@ export class Pipeline {
 		const cmdTemplate = await this.resolvePrCommand();
 		this.log("info", `PR ready: ${title}`, `${body}\n\n---\nCommits:\n\`\`\`\n${await G.commitLog(this.wt, s.baseRef as string)}\n\`\`\``);
 
-		let doPr = this.cfg.pr.push;
-		if (this.cfg.gates.pr && !s.prApproved) {
-			if (!this.d.ctx.hasUI) throw new Pause("awaiting PR approval");
-			const opts = cmdTemplate ? ["Push & open PR", "Push only", "Keep local (pause)"] : ["Push", "Keep local (pause)"];
-			const pick = await this.choose(`${title} — total ${fmtUsd(s.costUsd)}`, opts, "Keep local (pause)");
-			if (pick.startsWith("Keep local")) throw new Pause("awaiting PR approval");
-			doPr = pick === "Push & open PR";
-			if (pick === "Push only" || pick === "Push") {
-				await G.push(this.wt, this.cfg.git.remote, s.branch as string);
-				s.pushed = true;
-				this.save();
-				return;
-			}
+		const gate = await this.prDecision(title, Boolean(cmdTemplate));
+		if (gate.pushOnly) {
+			await this.pushBranch();
+			return;
 		}
 		if (!this.cfg.pr.push) return;
-		this.d.dash.setNote(`git push ${this.cfg.git.remote} ${s.branch}`);
-		await G.push(this.wt, this.cfg.git.remote, s.branch as string);
-		s.pushed = true;
-		this.save();
-		if (!doPr || !cmdTemplate) return;
-		const cmd = fill(cmdTemplate, {
-			title: shellQuote(title),
-			bodyFile: shellQuote(bodyFile),
-			base: shellQuote(s.base as string),
-			branch: shellQuote(s.branch as string),
-			remote: shellQuote(this.cfg.git.remote),
-			draft: this.cfg.pr.draft ? "--draft" : "",
-		});
-		this.d.dash.setNote("opening PR");
-		const r = await sh(cmd, { cwd: this.wt, timeoutMs: 120_000 });
-		if (r.code !== 0) throw new Error(`PR command failed: ${(r.stderr || r.stdout).trim()}\nCommand: ${cmd}`);
-		s.prUrl = /(https?:\/\/\S+)/.exec(r.stdout)?.[1] ?? r.stdout.trim();
-		this.save();
+		await this.pushBranch();
+		if (!gate.openPr || !cmdTemplate) return;
+		await this.openPr(title, bodyFile, cmdTemplate);
 	}
 }
 
