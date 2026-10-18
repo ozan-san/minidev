@@ -1,10 +1,11 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import { type RunState, type Stage } from "./state.ts";
 import { fmtUsd } from "./util.ts";
 import {
 	collapseActivity,
 	pushActivity,
+	renderDetail,
 	renderWidget,
 	MAX_ACTIVITY,
 	MAX_LOG,
@@ -15,6 +16,49 @@ import {
 } from "./ui-model.ts";
 
 const WIDGET = "minidev";
+const MAX_VISIBLE = 22;
+
+/** Scrollable overlay showing the full run details and activity log. */
+class DetailOverlay implements Component {
+	private offset = 0;
+	private timer: NodeJS.Timeout;
+
+	constructor(
+		private tui: TUI,
+		private theme: Theme,
+		private getView: () => DashboardView,
+		private done: () => void,
+	) {
+		this.timer = setInterval(() => this.tui.requestRender(), 1000);
+		this.timer.unref();
+	}
+
+	dispose(): void {
+		clearInterval(this.timer);
+	}
+
+	invalidate(): void {}
+
+	handleInput(data: string): void {
+		const total = renderDetail(this.getView(), this.theme).length;
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
+			this.done();
+			return;
+		}
+		if (matchesKey(data, "up")) this.offset -= 1;
+		else if (matchesKey(data, "down")) this.offset += 1;
+		else if (matchesKey(data, "pageUp")) this.offset -= MAX_VISIBLE;
+		else if (matchesKey(data, "pageDown")) this.offset += MAX_VISIBLE;
+		this.offset = Math.max(0, Math.min(this.offset, Math.max(0, total - MAX_VISIBLE)));
+		this.tui.requestRender();
+	}
+
+	render(width: number): string[] {
+		return renderDetail(this.getView(), this.theme)
+			.map((line) => truncateToWidth(line, width))
+			.slice(this.offset, this.offset + MAX_VISIBLE);
+	}
+}
 
 /** Persistent dashboard above the editor + footer status. */
 export class Dashboard {
@@ -96,6 +140,14 @@ export class Dashboard {
 		if (this.visible) this.hide();
 		else this.show();
 		return this.visible;
+	}
+
+	async openDetails(): Promise<void> {
+		if (!this.state || !this.ctx.hasUI) return;
+		await this.ctx.ui.custom<void>((tui, theme, _kb, done) => new DetailOverlay(tui, theme, () => this.view(), done), {
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "80%", minWidth: 60, maxHeight: 26 },
+		});
 	}
 
 	stage(_stage: Stage): void {
