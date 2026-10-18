@@ -26,6 +26,8 @@ const theme = {
 
 const tui = { requestRender: () => {} } as unknown as TUI;
 
+const visibleWidth = (text: string): number => text.replace(/\u001b\[[0-9;]*m/g, "").length;
+
 function makeState(over: Partial<RunState> = {}): RunState {
 	return {
 		version: 1,
@@ -86,6 +88,11 @@ describe("Dashboard dismissal", () => {
 		const handleInput = open.handleInput?.bind(open);
 		assert.ok(handleInput);
 		assert.doesNotThrow(() => open.render(80));
+		const overlayLines = open.render(80);
+		assert.ok(overlayLines.length > 0);
+		for (const line of overlayLines) {
+			assert.ok(visibleWidth(line) <= 80, `overlay line wider than 80: ${JSON.stringify(line)}`);
+		}
 		assert.doesNotThrow(() => handleInput("up"));
 
 		// A dismissed panel cannot be resurrected or opened again.
@@ -94,5 +101,32 @@ describe("Dashboard dismissal", () => {
 		assert.equal(dash.toggle(), false);
 		await dash.openDetails();
 		assert.equal(customCalls, 1);
+	});
+});
+
+describe("Dashboard widget", () => {
+	test("renders framed lines that fit the terminal width", () => {
+		let widget: Component | undefined;
+		const ctx = {
+			mode: "tui",
+			hasUI: true,
+			ui: {
+				setWidget: (_key: string, factory?: (tui: TUI, theme: Theme) => Component) => {
+					if (factory) widget = factory(tui, theme);
+				},
+				setStatus: () => {},
+				custom: async () => {},
+			},
+		} as unknown as ExtensionContext;
+
+		const dash = new Dashboard(ctx);
+		dash.attach(makeState());
+		assert.ok(widget);
+		const lines = widget.render(72);
+		assert.ok(lines.length > 0);
+		for (const line of lines) {
+			assert.ok(visibleWidth(line) <= 72, `widget line wider than 72: ${JSON.stringify(line)}`);
+		}
+		dash.dismiss();
 	});
 });
