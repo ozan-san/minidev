@@ -234,13 +234,22 @@ describe("agentSummary", () => {
 });
 
 describe("renderWidget", () => {
-	test("header contains key, title and status", () => {
-		const out = renderWidget(makeView({ state: makeState({ status: "running" }) }), theme);
+	test("header contains key, title, status and version label", () => {
+		const out = renderWidget(
+			makeView({ state: makeState({ status: "running" }), version: "v0.1.0 (abc1234)" }),
+			theme,
+		);
 		const header = out[0];
 		assert.ok(header.includes("minidev"));
 		assert.ok(header.includes("MD-1"));
 		assert.ok(header.includes("Better UI"));
 		assert.ok(header.includes("running"));
+		assert.ok(header.includes("v0.1.0 (abc1234)"));
+	});
+
+	test("header omits the version label when unset", () => {
+		const header = renderWidget(makeView({ state: makeState({ status: "running" }) }), theme)[0];
+		assert.ok(!header.includes("v0.1.0"));
 	});
 
 	test("pipeline line contains every stage", () => {
@@ -318,6 +327,13 @@ describe("renderWidget", () => {
 });
 
 describe("renderDetail", () => {
+	test("first line includes the version label", () => {
+		const out = renderDetail(makeView({ version: "v0.1.0 (abc1234)" }), theme);
+		assert.ok(out[0].includes("minidev"));
+		assert.ok(out[0].includes("v0.1.0 (abc1234)"));
+		assert.ok(out[0].includes("MD-1"));
+	});
+
 	test("includes Subtasks, Agents, Checks and Activity sections", () => {
 		const state = makeState({
 			subtasks: [{ id: "s1", title: "one", goal: "", status: "running", attempts: 2 }],
