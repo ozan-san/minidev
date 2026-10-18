@@ -79,6 +79,11 @@ export class Dashboard {
 		return this.visible;
 	}
 
+	/** True while a run is attached (i.e. the panel can still be shown). */
+	get isAttached(): boolean {
+		return this.state !== undefined;
+	}
+
 	private mount(): void {
 		if (this.ctx.mode !== "tui") return;
 		this.ctx.ui.setWidget(WIDGET, (tui: TUI, theme: Theme) => {
@@ -123,6 +128,24 @@ export class Dashboard {
 		this.visible = false;
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
+		if (this.ctx.hasUI) {
+			this.ctx.ui.setWidget(WIDGET, undefined);
+			this.ctx.ui.setStatus(WIDGET, undefined);
+		}
+	}
+
+	/** Remove the widget and status and forget the run — unlike hide(), it cannot be shown again. */
+	dismiss(): void {
+		this.visible = false;
+		if (this.timer) clearInterval(this.timer);
+		this.timer = undefined;
+		this.agent = undefined;
+		this.activity = [];
+		this.log = [];
+		this.note = "";
+		this.waitingSince = undefined;
+		this.state = undefined;
+		this.tui = undefined;
 		if (this.ctx.hasUI) {
 			this.ctx.ui.setWidget(WIDGET, undefined);
 			this.ctx.ui.setStatus(WIDGET, undefined);
