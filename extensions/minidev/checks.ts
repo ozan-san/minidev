@@ -21,7 +21,7 @@ export interface CheckResult {
 export function extractErrors(output: string): string {
 	const lines = output.split("\n");
 	const picked = lines.filter((l) =>
-		/^(e: |w: .*error|.*error:|FAILURE:|\* What went wrong|> Task .* FAILED|.*Exception|\s+at .*Test|.*FAILED$|Execution failed)/.test(l),
+		/^(e: |w: .*error|.*error(?: TS\d+|:)|FAILURE:|\* What went wrong|> Task .* FAILED|.*Exception|\s+at .*Test|.*FAILED$|Execution failed)/.test(l),
 	);
 	return picked.slice(0, 80).join("\n");
 }
