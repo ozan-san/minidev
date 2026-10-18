@@ -23,6 +23,18 @@ export interface ActivityEntry {
 export const MAX_ACTIVITY = 6;
 export const MAX_LOG = 300;
 
+/** Per-stage border colors; the current stage tints the panel frame. */
+export const STAGE_COLORS: Record<Stage, ThemeColor> = {
+	workspace: "borderMuted",
+	detect: "border",
+	scout: "toolOutput",
+	plan: "borderAccent",
+	build: "accent",
+	test: "warning",
+	review: "success",
+	pr: "mdLink",
+};
+
 export interface DashboardView {
 	state: RunState;
 	agent?: LiveAgent;
@@ -33,6 +45,8 @@ export interface DashboardView {
 	waitingSince?: number;
 	now: number;
 	version?: string;
+	/** Terminal width available to the panel; when set, the frame is padded to it. */
+	width?: number;
 }
 
 export function collapseActivity(text: string): string {
@@ -80,6 +94,52 @@ export function progressBar(fraction: number, width: number): string {
 	const clamped = Math.min(1, Math.max(0, fraction));
 	const filled = Math.round(clamped * width);
 	return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+const ANSI_SGR = /\u001b\[[0-9;]*m/g;
+const ANSI_SGR_EXACT = /^\u001b\[[0-9;]*m$/;
+
+/** Visible cell count of a themed string (ANSI escape sequences are ignored). */
+export function textWidth(text: string): number {
+	return text.replace(ANSI_SGR, "").length;
+}
+
+/** Clip a themed string to `max` visible cells, keeping it reset-terminated. */
+export function truncateVisible(text: string, max: number): string {
+	if (max <= 0) return "";
+	if (textWidth(text) <= max) return text;
+	let out = "";
+	let visible = 0;
+	let ansi = false;
+	for (const part of text.split(/(\u001b\[[0-9;]*m)/)) {
+		if (ANSI_SGR_EXACT.test(part)) {
+			ansi = true;
+			out += part;
+			continue;
+		}
+		const room = max - visible;
+		if (room <= 0) break;
+		out += part.slice(0, room);
+		visible += Math.min(part.length, room);
+	}
+	return ansi ? `${out}\u001b[0m` : out;
+}
+
+/**
+ * Draw a box around `lines` with box-drawing characters, colored by `color`.
+ * With `width` the frame spans the terminal and content is clipped to width - 4;
+ * without it the box hugs the widest line (keeps the renderers unit-testable).
+ */
+export function frameLines(lines: string[], th: Theme, opts: { color: ThemeColor; width?: number }): string[] {
+	const widest = lines.reduce((max, l) => Math.max(max, textWidth(l)), 0);
+	const inner = opts.width === undefined ? widest : Math.max(0, opts.width - 4);
+	const bar = "─".repeat(inner + 2);
+	const border = (text: string) => th.fg(opts.color, text);
+	const body = lines.map((l) => {
+		const clipped = truncateVisible(l, inner);
+		return `${border("│")} ${clipped}${" ".repeat(Math.max(0, inner - textWidth(clipped)))} ${border("│")}`;
+	});
+	return [border(`╭${bar}╮`), ...body, border(`╰${bar}╯`)];
 }
 
 export function renderWidget(v: DashboardView, th: Theme): string[] {
