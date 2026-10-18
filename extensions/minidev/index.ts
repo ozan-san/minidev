@@ -38,6 +38,9 @@ interface Active {
 
 const SUBCOMMANDS = ["run", "resume", "approve", "status", "journal", "stop", "detect", "ui", "models", "budget", "clean", "config"] as const;
 
+/** Sentinel option in the model picker that opens the full registry list. */
+const BROWSE_ALL = "Browse all available…";
+
 export default function minidev(pi: ExtensionAPI) {
 	let active: Active | undefined;
 	let dashboard: Dashboard | undefined;
@@ -213,6 +216,38 @@ export default function minidev(pi: ExtensionAPI) {
 		return { model: `${exact.provider}/${exact.id}`, thinking };
 	}
 
+	/** Resolve the model picker's answer into a model reference string; undefined when the user cancels. */
+	async function selectModelRef(choice: string, ctx: ExtensionCommandContext): Promise<string | undefined> {
+		if (choice === BROWSE_ALL) {
+			const all = ctx.modelRegistry
+				.getAvailable()
+				.map((x) => `${x.provider}/${x.id}`)
+				.sort();
+			return (await ctx.ui.select(`All available models (${all.length})`, all)) ?? undefined;
+		}
+		if (choice === "Type a model id…") return (await ctx.ui.input("Model id", "openrouter/vendor/model")) ?? undefined;
+		return choice;
+	}
+
+	/** Ask for a thinking level and a scope, then persist the change to this run or the user config. */
+	async function applyModelChoice(role: Role, modelRef: string, runState: RunState | undefined, ctx: ExtensionCommandContext): Promise<void> {
+		const rm = parseModelRef(modelRef, ctx);
+		if (!rm) return ctx.ui.notify(`Model not found or no credentials: ${modelRef}`, "error");
+		const thinking = await ctx.ui.select(`Thinking level for ${role}`, [...THINKING_LEVELS]);
+		if (thinking) rm.thinking = thinking as Thinking;
+
+		const scopes = runState ? [`This run only (${runState.key})`, "Save as default"] : ["Save as default"];
+		const scope = scopes.length > 1 ? await ctx.ui.select("Apply to", scopes) : scopes[0];
+		if (!scope) return;
+		if (scope.startsWith("This run") && runState) {
+			runState.modelOverrides = { ...(runState.modelOverrides ?? {}), [role]: rm };
+			saveState(runState);
+		} else {
+			saveUserConfig({ models: { [role]: rm } });
+		}
+		ctx.ui.notify(`minidev: ${role} → ${rm.model}${rm.thinking ? `:${rm.thinking}` : ""} (applies from the next ${role} call)`, "info");
+	}
+
 	async function cmdModels(arg: string, ctx: ExtensionCommandContext): Promise<void> {
 		const repoRoot = (await mainRepoRoot(ctx.cwd)) ?? undefined;
 		const cfg = loadConfig(repoRoot);
@@ -236,34 +271,11 @@ export default function minidev(pi: ExtensionAPI) {
 		if (!role) return;
 		const current = effectiveModel(runState, cfg, role);
 		const known = [...new Set([...ROLES.map((r) => cfg.models[r].model), current.model])];
-		const choice = await ctx.ui.select(`Model for ${role} (now ${current.model})`, [...known, "Browse all available…", "Type a model id…"]);
+		const choice = await ctx.ui.select(`Model for ${role} (now ${current.model})`, [...known, BROWSE_ALL, "Type a model id…"]);
 		if (!choice) return;
-		let modelRef: string | undefined = choice;
-		if (choice === "Browse all available…") {
-			const all = ctx.modelRegistry
-				.getAvailable()
-				.map((x) => `${x.provider}/${x.id}`)
-				.sort();
-			modelRef = await ctx.ui.select(`All available models (${all.length})`, all);
-		} else if (choice === "Type a model id…") {
-			modelRef = await ctx.ui.input("Model id", "openrouter/vendor/model");
-		}
+		const modelRef = await selectModelRef(choice, ctx);
 		if (!modelRef) return;
-		const rm = parseModelRef(modelRef, ctx);
-		if (!rm) return ctx.ui.notify(`Model not found or no credentials: ${modelRef}`, "error");
-		const thinking = await ctx.ui.select(`Thinking level for ${role}`, [...THINKING_LEVELS]);
-		if (thinking) rm.thinking = thinking as Thinking;
-
-		const scopes = runState ? [`This run only (${runState.key})`, "Save as default"] : ["Save as default"];
-		const scope = scopes.length > 1 ? await ctx.ui.select("Apply to", scopes) : scopes[0];
-		if (!scope) return;
-		if (scope.startsWith("This run") && runState) {
-			runState.modelOverrides = { ...(runState.modelOverrides ?? {}), [role]: rm };
-			saveState(runState);
-		} else {
-			saveUserConfig({ models: { [role]: rm } });
-		}
-		ctx.ui.notify(`minidev: ${role} → ${rm.model}${rm.thinking ? `:${rm.thinking}` : ""} (applies from the next ${role} call)`, "info");
+		await applyModelChoice(role, modelRef, runState, ctx);
 	}
 
 	async function cmdBudget(arg: string, ctx: ExtensionCommandContext): Promise<void> {
