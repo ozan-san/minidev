@@ -5,6 +5,7 @@
  *   /minidev resume [KEY]                          continue a paused/failed run
  *   /minidev approve [KEY]                         approve a pending plan/PR gate and resume
  *   /minidev status                                list runs for this repo
+ *   /minidev journal [KEY]                         show a run's durable journal
  *   /minidev stop                                  stop the active run (resumable)
  *   /minidev detect                                show which mode (stack) minidev picks for this repo
  *   /minidev ui [show|hide|toggle|details]         show, hide or inspect the run panel
@@ -18,6 +19,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Key, Markdown, Text } from "@earendil-works/pi-tui";
 import { loadConfig, PROJECT_CONFIG, ROLES, saveUserConfig, THINKING_LEVELS, USER_CONFIG, type Role, type RoleModel, type Thinking } from "./config.ts";
+import { journalFile, reapOrphanedAgents, readJournal, summarizeJournal } from "./durable.ts";
 import { mainRepoRoot } from "./git.ts";
 import { effectiveModel, Pipeline, removeWorktree, type LogEntry } from "./pipeline.ts";
 import { listRuns, loadState, runDirFor, saveState, type RunState } from "./state.ts";
@@ -33,7 +35,7 @@ interface Active {
 	done: Promise<void>;
 }
 
-const SUBCOMMANDS = ["run", "resume", "approve", "status", "stop", "detect", "ui", "models", "budget", "clean", "config"];
+const SUBCOMMANDS = ["run", "resume", "approve", "status", "journal", "stop", "detect", "ui", "models", "budget", "clean", "config"];
 
 export default function minidev(pi: ExtensionAPI) {
 	// Never register inside our own subagent processes.
@@ -76,6 +78,10 @@ export default function minidev(pi: ExtensionAPI) {
 
 	/** Starts a run in the background. Headless (pi -p / json) callers await the returned promise. */
 	function start(state: RunState, ctx: ExtensionContext): Promise<void> {
+		if (loadConfig(state.repoRoot).durable.reapOrphans) {
+			const killed = reapOrphanedAgents(state.runDir);
+			if (killed.length) ctx.ui.notify(`minidev: killed ${killed.length} leftover subagent process(es) from an interrupted run`, "warning");
+		}
 		const controller = new AbortController();
 		const dash = new Dashboard(ctx);
 		dashboard = dash;
@@ -285,9 +291,26 @@ export default function minidev(pi: ExtensionAPI) {
 		if (!runs.length) return ctx.ui.notify("minidev: no runs for this repo", "info");
 		const lines = runs.map((r) => {
 			const done = r.subtasks.filter((t) => t.status === "done").length;
-			return `${active?.state.key === r.key ? "▶ " : ""}${r.key} · ${r.status}${r.pauseReason ? ` (${r.pauseReason})` : ""} @ ${r.stage} · ${done}/${r.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}/${fmtUsd(r.budgetUsd)}${r.prUrl ? ` · ${r.prUrl}` : ""}\n   ${r.title}${r.stack ? ` [${r.stack.label}]` : ""}`;
+			const j = summarizeJournal(readJournal(journalFile(r.runDir)));
+			const interrupted = r.status === "running" && active?.state.key !== r.key;
+			return `${active?.state.key === r.key ? "▶ " : ""}${r.key} · ${r.status}${r.pauseReason ? ` (${r.pauseReason})` : ""} @ ${r.stage} · ${done}/${r.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}/${fmtUsd(r.budgetUsd)}${r.prUrl ? ` · ${r.prUrl}` : ""}${interrupted ? ` · ⚠ interrupted — /minidev resume ${r.key}` : ""} · ${j.entries} journal entries${j.inFlight.length ? ` · ${j.inFlight.length} in flight` : ""}\n   ${r.title}${r.stack ? ` [${r.stack.label}]` : ""}`;
 		});
 		pi.appendEntry<LogEntry>("minidev", { key: path.basename(repoRoot), kind: "info", title: `${runs.length} run(s)`, body: lines.map((l) => `- ${l}`).join("\n") });
+	}
+
+	async function cmdJournal(arg: string, ctx: ExtensionCommandContext): Promise<void> {
+		const s = await pickRun(arg, ctx);
+		if (!s) return;
+		const entries = readJournal(journalFile(s.runDir));
+		const body =
+			entries
+				.slice(-100)
+				.map(
+					(e) =>
+						`- #${e.seq} ${new Date(e.ts).toISOString()} ${e.type}${e.item ? ` ${e.item}` : ""}${e.type === "agent_finished" ? ` ${e.ok ? "ok" : "failed"} ${fmtUsd(e.costUsd ?? 0)}` : ""}`,
+				)
+				.join("\n") || "(no journal entries yet)";
+		pi.appendEntry<LogEntry>("minidev", { key: s.key, kind: "info", title: `journal ${s.key} (${entries.length})`, body });
 	}
 
 	async function cmdUi(arg: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -317,7 +340,7 @@ export default function minidev(pi: ExtensionAPI) {
 	// ── commands ─────────────────────────────────────────────────────────────
 
 	pi.registerCommand("minidev", {
-		description: "Ticket → PR pipeline: run | resume | approve | status | stop | detect | ui | models | budget | clean | config",
+		description: "Ticket → PR pipeline: run | resume | approve | status | journal | stop | detect | ui | models | budget | clean | config",
 		getArgumentCompletions: (prefix) => {
 			const parts = prefix.split(/\s+/);
 			if (parts.length <= 1) return SUBCOMMANDS.filter((s) => s.startsWith(parts[0] ?? "")).map((s) => ({ value: s, label: s }));
@@ -349,6 +372,8 @@ export default function minidev(pi: ExtensionAPI) {
 				}
 				case "status":
 					return cmdStatus(ctx);
+				case "journal":
+					return cmdJournal(rest, ctx);
 				case "stop":
 					if (!active) return ctx.ui.notify("minidev: nothing running", "info");
 					ctx.ui.notify(`minidev: stopping ${active.state.key}…`, "info");

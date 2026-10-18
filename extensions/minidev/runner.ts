@@ -6,6 +6,7 @@ import type { RoleModel } from "./config.ts";
 import { ensureDir } from "./util.ts";
 
 export type RunnerEvent =
+	| { type: "started"; pid: number }
 	| { type: "tool"; name: string; summary: string }
 	| { type: "text"; text: string }
 	| { type: "usage"; costUsd: number; turns: number; model?: string }
@@ -38,6 +39,8 @@ export interface RunAgentResult {
 	budgetExceeded: boolean;
 	aborted: boolean;
 	transcript: string;
+	/** True when the result was served from the durable journal instead of a new process. */
+	replayed?: boolean;
 }
 
 const GUARD = path.join(PACKAGE_ROOT, "guard", "guard.ts");
@@ -106,6 +109,7 @@ export async function runAgent(o: RunAgentOptions): Promise<RunAgentResult> {
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, MINIDEV_CHILD: "1", MINIDEV_WORKTREE: o.cwd },
 		});
+		o.onEvent?.({ type: "started", pid: proc.pid ?? 0 });
 		let buf = "";
 		const kill = () => {
 			proc.kill("SIGTERM");

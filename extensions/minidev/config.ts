@@ -92,6 +92,12 @@ export interface Config {
 		/** Whether the tester agent writes new unit tests. "auto": only if the repo already has unit tests (stack-aware). */
 		write: "auto" | "always" | "never";
 	};
+	durable: {
+		/** Reuse recorded successful agent calls when a run is resumed after a pause or crash. */
+		replay: "safe" | "off";
+		/** Kill subagent processes left over from an interrupted run before resuming. */
+		reapOrphans: boolean;
+	};
 	limits: {
 		maxSubtasks: number;
 		/** Builder attempts per subtask (incl. retries after failed subtask checks). */
@@ -138,6 +144,7 @@ export const DEFAULT_CONFIG: Config = {
 	},
 	pr: { push: true, command: "auto", draft: true },
 	tests: { write: "auto" },
+	durable: { replay: "safe", reapOrphans: true },
 	limits: { maxSubtasks: 12, subtaskAttempts: 3, fixRounds: 3, reviewRounds: 1 },
 	subagent: { isolate: true, extraArgs: [] },
 	runsDir: "~/.minidev/runs",
