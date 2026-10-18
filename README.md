@@ -157,7 +157,7 @@ npm run typecheck                # finds your pi install at runtime (or set PI_N
 npm test                         # node:test via native TS type-stripping (Node >= 22.18); tests are extensions/**/*.test.ts
 ```
 
-Unit tests must not import `@earendil-works/pi-coding-agent` or `@earendil-works/pi-tui` (which are peer packages, absent locally); `@earendil-works/pi-durable` and `@earendil-works/chord` are ordinary dependencies and are fine. Use `import type` for type-only imports.
+Unit tests must not import `@earendil-works/pi-coding-agent` or `@earendil-works/pi-tui` (which are peer packages, absent locally); `@earendil-works/pi-durable` and `@earendil-works/chord` are ordinary dependencies and are fine. Use `import type` for type-only imports. Modules must avoid TypeScript syntax that strip-only mode rejects (constructor parameter properties, enums without `as const` objects, namespaces) so `node --test` can load them.
 
 ### CI
 

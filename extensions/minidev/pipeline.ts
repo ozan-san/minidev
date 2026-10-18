@@ -17,8 +17,11 @@ import { exec, extractJson, fmtUsd, sh, shellQuote, slugify, stripJsonBlocks, wr
 
 /** Stops the run but keeps it resumable. */
 export class Pause extends Error {
-	constructor(public reason: string) {
+	reason: string;
+
+	constructor(reason: string) {
 		super(reason);
+		this.reason = reason;
 	}
 }
 
@@ -51,12 +54,13 @@ function guessType(title: string): string {
 export class Pipeline {
 	private cfg: Config;
 	private warned = false;
+	private s: RunState;
+	private d: PipelineDeps;
 	private agentRuntime?: Promise<AgentHarness>;
 
-	constructor(
-		private s: RunState,
-		private d: PipelineDeps,
-	) {
+	constructor(s: RunState, d: PipelineDeps) {
+		this.s = s;
+		this.d = d;
 		this.cfg = loadConfig(s.repoRoot);
 	}
 
