@@ -19,7 +19,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Key, Markdown, Text } from "@earendil-works/pi-tui";
 import { loadConfig, PROJECT_CONFIG, ROLES, saveUserConfig, THINKING_LEVELS, USER_CONFIG, type Role, type RoleModel, type Thinking } from "./config.ts";
-import { closeJournals, reapOrphanedAgents, readJournal, summarizeJournal } from "./durable.ts";
+import { closeJournals, readJournal, summarizeJournal } from "./durable.ts";
 import { mainRepoRoot } from "./git.ts";
 import { effectiveModel, Pipeline, removeWorktree, type LogEntry } from "./pipeline.ts";
 import { listRuns, loadState, runDirFor, saveState, type RunState } from "./state.ts";
@@ -86,10 +86,6 @@ export default function minidev(pi: ExtensionAPI) {
 
 	/** Starts a run in the background. Headless (pi -p / json) callers await the returned promise. */
 	async function start(state: RunState, ctx: ExtensionContext): Promise<void> {
-		if (loadConfig(state.repoRoot).durable.reapOrphans) {
-			const killed = await reapOrphanedAgents(state.runDir);
-			if (killed.length) ctx.ui.notify(`minidev: killed ${killed.length} leftover subagent process(es) from an interrupted run`, "warning");
-		}
 		const controller = new AbortController();
 		const dash = new Dashboard(ctx, versionLabel);
 		dashboard = dash;

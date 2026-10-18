@@ -97,10 +97,8 @@ export interface Config {
 		write: "auto" | "always" | "never";
 	};
 	durable: {
-		/** Reuse recorded successful agent calls when a run is resumed after a pause or crash. */
+		/** Replay settled successful agent submissions when a run is resumed. */
 		replay: "safe" | "off";
-		/** Kill subagent processes left over from an interrupted run before resuming. */
-		reapOrphans: boolean;
 	};
 	ui: {
 		/** See UiDismiss. "done" (default) removes the panel when a run succeeds; paused/failed runs keep it so you can resume. */
@@ -114,15 +112,6 @@ export interface Config {
 		fixRounds: number;
 		/** Review → fix rounds. */
 		reviewRounds: number;
-	};
-	subagent: {
-		/**
-		 * Run children with `--no-extensions` plus the minidev guard (blocks git mutations and
-		 * writes outside the worktree). Set false to load your normal pi extensions in subagents.
-		 */
-		isolate: boolean;
-		/** Extra args passed to every child `pi` process. */
-		extraArgs: string[];
 	};
 	/** Where run artifacts (ticket, plan, logs, transcripts, state) are stored. */
 	runsDir: string;
@@ -152,10 +141,9 @@ export const DEFAULT_CONFIG: Config = {
 	},
 	pr: { push: true, command: "auto", draft: false },
 	tests: { write: "auto" },
-	durable: { replay: "safe", reapOrphans: true },
+	durable: { replay: "safe" },
 	ui: { dismissOn: "done" },
 	limits: { maxSubtasks: 12, subtaskAttempts: 3, fixRounds: 3, reviewRounds: 1 },
-	subagent: { isolate: true, extraArgs: [] },
 	runsDir: "~/.minidev/runs",
 };
 
