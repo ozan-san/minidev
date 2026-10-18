@@ -109,9 +109,21 @@ export class Dashboard {
 		}
 	}
 
-	private unmount(): void {
+	/** Stop the refresh tick; safe when no tick is running. */
+	private stopTimer(): void {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
+	}
+
+	/** Remove the run panel widget and footer status when the host has a UI. */
+	private clearWidgetAndStatus(): void {
+		if (!this.ctx.hasUI) return;
+		this.ctx.ui.setWidget(WIDGET, undefined);
+		this.ctx.ui.setStatus(WIDGET, undefined);
+	}
+
+	private unmount(): void {
+		this.stopTimer();
 		if (this.ctx.mode === "tui") this.ctx.ui.setWidget(WIDGET, undefined);
 	}
 
@@ -127,8 +139,7 @@ export class Dashboard {
 	}
 
 	detach(keepSummary = true): void {
-		if (this.timer) clearInterval(this.timer);
-		this.timer = undefined;
+		this.stopTimer();
 		this.agent = undefined;
 		if (!keepSummary) this.hide();
 		else this.refresh();
@@ -136,20 +147,15 @@ export class Dashboard {
 
 	hide(): void {
 		this.visible = false;
-		if (this.timer) clearInterval(this.timer);
-		this.timer = undefined;
-		if (this.ctx.hasUI) {
-			this.ctx.ui.setWidget(WIDGET, undefined);
-			this.ctx.ui.setStatus(WIDGET, undefined);
-		}
+		this.stopTimer();
+		this.clearWidgetAndStatus();
 	}
 
 	/** Remove the widget and status and forget the run — unlike hide(), it cannot be shown again. */
 	dismiss(): void {
 		this.attached = false;
 		this.visible = false;
-		if (this.timer) clearInterval(this.timer);
-		this.timer = undefined;
+		this.stopTimer();
 		this.agent = undefined;
 		this.activity = [];
 		this.log = [];
@@ -157,10 +163,7 @@ export class Dashboard {
 		this.waitingSince = undefined;
 		// Keep state so an already-open details overlay can finish rendering.
 		this.tui = undefined;
-		if (this.ctx.hasUI) {
-			this.ctx.ui.setWidget(WIDGET, undefined);
-			this.ctx.ui.setStatus(WIDGET, undefined);
-		}
+		this.clearWidgetAndStatus();
 	}
 
 	show(): void {
