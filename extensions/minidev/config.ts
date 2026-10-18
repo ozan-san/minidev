@@ -1,0 +1,168 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { deepMerge, ensureDir, expandHome } from "./util.ts";
+
+export const ROLES = ["scout", "planner", "builder", "tester", "reviewer"] as const;
+export type Role = (typeof ROLES)[number];
+
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type Thinking = (typeof THINKING_LEVELS)[number];
+
+export interface RoleModel {
+	/** Model reference as accepted by `pi --model`, e.g. "openrouter/deepseek/deepseek-v4.1-flash". */
+	model: string;
+	thinking?: Thinking;
+	/** Optional cap for a single invocation of this role. */
+	maxUsdPerCall?: number;
+}
+
+export interface Check {
+	name: string;
+	/** Shell command, run with bash -lc in the worktree. */
+	command: string;
+	/** Failing a non-blocking check is reported but does not trigger fixes or stop the run. */
+	blocking?: boolean;
+	/** "hasTests": only run when the repo contains JVM unit tests (src/test/). */
+	when?: "always" | "hasTests";
+	timeoutSec?: number;
+}
+
+export interface Config {
+	models: Record<Role, RoleModel>;
+	budget: {
+		/** Hard cap for one ticket run (all agents). The run pauses when reached. */
+		maxUsdPerRun: number;
+		/** Warn when this fraction of the budget is spent. */
+		warnAt: number;
+	};
+	gates: {
+		/** Ask for approval after planning. */
+		plan: boolean;
+		/** Ask for approval before pushing / opening the PR. */
+		pr: boolean;
+	};
+	git: {
+		remote: string;
+		/** Base branch; detected from <remote>/HEAD when empty. */
+		baseBranch: string;
+		fetch: boolean;
+		/** Placeholders: {key} {slug} {type} */
+		branchTemplate: string;
+		/** Placeholders: {key} {title} */
+		commitTemplate: string;
+		/** Placeholders: {key} {id} {title} */
+		subtaskCommitTemplate: string;
+		commitPerSubtask: boolean;
+		/** Worktrees go to <worktreeRoot>/<repoName>/<key>. */
+		worktreeRoot: string;
+		/** Untracked files copied from the main checkout into the worktree (e.g. Android local.properties). */
+		copyIntoWorktree: string[];
+	};
+	pr: {
+		push: boolean;
+		/**
+		 * Command that opens the PR after pushing. "auto" = gh (GitHub) / glab (GitLab) if installed,
+		 * "" = push only. Placeholders (shell-quoted): {title} {bodyFile} {base} {branch} {remote} {draft}
+		 */
+		command: string;
+		draft: boolean;
+	};
+	checks: {
+		/** Run after every builder subtask. Failures are fed back to the builder. */
+		subtask: Check[];
+		/** Run after testing and after review fixes. */
+		final: Check[];
+	};
+	tests: {
+		/** Whether the tester agent writes new unit tests. "auto": only if the repo already has unit tests. */
+		write: "auto" | "always" | "never";
+	};
+	limits: {
+		maxSubtasks: number;
+		/** Builder attempts per subtask (incl. retries after failed subtask checks). */
+		subtaskAttempts: number;
+		/** Fix rounds after failing final checks. */
+		fixRounds: number;
+		/** Review → fix rounds. */
+		reviewRounds: number;
+	};
+	subagent: {
+		/**
+		 * Run children with `--no-extensions` plus the minidev guard (blocks git mutations and
+		 * writes outside the worktree). Set false to load your normal pi extensions in subagents.
+		 */
+		isolate: boolean;
+		/** Extra args passed to every child `pi` process. */
+		extraArgs: string[];
+	};
+	/** Where run artifacts (ticket, plan, logs, transcripts, state) are stored. */
+	runsDir: string;
+}
+
+const GRADLE = "./gradlew --console=plain";
+
+export const DEFAULT_CONFIG: Config = {
+	models: {
+		scout: { model: "openrouter/deepseek/deepseek-v4.1-flash", thinking: "medium" },
+		planner: { model: "openrouter/anthropic/claude-opus-5.5", thinking: "high" },
+		builder: { model: "openrouter/deepseek/deepseek-v4.1-flash", thinking: "high" },
+		tester: { model: "openrouter/deepseek/deepseek-v4.1-flash", thinking: "high" },
+		reviewer: { model: "openrouter/anthropic/claude-opus-5.5", thinking: "medium" },
+	},
+	budget: { maxUsdPerRun: 10, warnAt: 0.8 },
+	gates: { plan: true, pr: true },
+	git: {
+		remote: "origin",
+		baseBranch: "",
+		fetch: true,
+		branchTemplate: "{type}/{key}-{slug}",
+		commitTemplate: "{key}: {title}",
+		subtaskCommitTemplate: "{key}: {title}",
+		commitPerSubtask: true,
+		worktreeRoot: "~/.minidev/worktrees",
+		copyIntoWorktree: ["local.properties"],
+	},
+	pr: { push: true, command: "auto", draft: true },
+	checks: {
+		subtask: [{ name: "assemble", command: `${GRADLE} assembleDebug`, blocking: true, timeoutSec: 1800 }],
+		final: [
+			{ name: "assemble", command: `${GRADLE} assembleDebug`, blocking: true, timeoutSec: 1800 },
+			{ name: "unit-tests", command: `${GRADLE} testDebugUnitTest`, blocking: true, when: "hasTests", timeoutSec: 2400 },
+			{ name: "lint", command: `${GRADLE} lintDebug`, blocking: false, timeoutSec: 1800 },
+		],
+	},
+	tests: { write: "auto" },
+	limits: { maxSubtasks: 12, subtaskAttempts: 3, fixRounds: 3, reviewRounds: 1 },
+	subagent: { isolate: true, extraArgs: [] },
+	runsDir: "~/.minidev/runs",
+};
+
+export const USER_DIR = path.join(os.homedir(), ".minidev");
+export const USER_CONFIG = path.join(USER_DIR, "config.json");
+export const PROJECT_CONFIG = ".minidev.json";
+
+function readJson(file: string): unknown {
+	try {
+		return JSON.parse(fs.readFileSync(file, "utf-8"));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw new Error(`Invalid JSON in ${file}: ${(err as Error).message}`);
+	}
+}
+
+/** defaults ← ~/.minidev/config.json ← <repo>/.minidev.json */
+export function loadConfig(repoRoot?: string): Config {
+	let cfg = deepMerge(DEFAULT_CONFIG, readJson(USER_CONFIG));
+	if (repoRoot) cfg = deepMerge(cfg, readJson(path.join(repoRoot, PROJECT_CONFIG)));
+	cfg.runsDir = expandHome(cfg.runsDir);
+	cfg.git.worktreeRoot = expandHome(cfg.git.worktreeRoot);
+	return cfg;
+}
+
+/** Patch the user config file (deep-merged into what is already there). */
+export function saveUserConfig(patch: unknown): void {
+	const current = (readJson(USER_CONFIG) as object | undefined) ?? {};
+	ensureDir(USER_DIR);
+	fs.writeFileSync(USER_CONFIG, `${JSON.stringify(deepMerge(current, patch), null, 2)}\n`);
+}

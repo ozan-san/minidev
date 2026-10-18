@@ -1,0 +1,39 @@
+{
+  "models": {
+    "scout": { "model": "openrouter/deepseek/deepseek-v4.1-flash", "thinking": "medium" },
+    "planner": { "model": "openrouter/anthropic/claude-opus-5.5", "thinking": "high", "maxUsdPerCall": 3 },
+    "builder": { "model": "openrouter/deepseek/deepseek-v4.1-flash", "thinking": "high" },
+    "tester": { "model": "openrouter/deepseek/deepseek-v4.1-flash", "thinking": "high" },
+    "reviewer": { "model": "openrouter/anthropic/claude-opus-5.5", "thinking": "medium" }
+  },
+  "budget": { "maxUsdPerRun": 10, "warnAt": 0.8 },
+  "gates": { "plan": true, "pr": true },
+  "git": {
+    "remote": "origin",
+    "baseBranch": "",
+    "branchTemplate": "{type}/{key}-{slug}",
+    "subtaskCommitTemplate": "{key}: {title}",
+    "commitPerSubtask": true,
+    "worktreeRoot": "~/.minidev/worktrees",
+    "copyIntoWorktree": ["local.properties", "app/google-services.json"]
+  },
+  "pr": {
+    "push": true,
+    "command": "auto",
+    "draft": true
+  },
+  "checks": {
+    "subtask": [
+      { "name": "compile", "command": "./gradlew --console=plain :app:compileDebugKotlin", "timeoutSec": 1200 }
+    ],
+    "final": [
+      { "name": "assemble", "command": "./gradlew --console=plain assembleDebug", "timeoutSec": 1800 },
+      { "name": "unit-tests", "command": "./gradlew --console=plain testDebugUnitTest", "when": "hasTests" },
+      { "name": "detekt", "command": "./gradlew --console=plain detekt", "blocking": false },
+      { "name": "lint", "command": "./gradlew --console=plain lintDebug", "blocking": false }
+    ]
+  },
+  "tests": { "write": "auto" },
+  "limits": { "maxSubtasks": 12, "subtaskAttempts": 3, "fixRounds": 3, "reviewRounds": 1 },
+  "subagent": { "isolate": true, "extraArgs": [] }
+}

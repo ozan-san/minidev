@@ -1,0 +1,559 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadAgents } from "./agents.ts";
+import { failuresReport, runChecks, type CheckResult } from "./checks.ts";
+import { loadConfig, type Config, type Role, type RoleModel } from "./config.ts";
+import * as G from "./git.ts";
+import * as P from "./prompts.ts";
+import { runAgent, type RunAgentResult } from "./runner.ts";
+import { artifact, saveState, STAGES, type PlanJson, type Review, type RunState, type Stage, type Subtask } from "./state.ts";
+import { ticketMarkdown } from "./ticket.ts";
+import type { Dashboard } from "./ui.ts";
+import { exec, extractJson, fmtUsd, sh, shellQuote, slugify, stripJsonBlocks, writeFile, readFileOr } from "./util.ts";
+
+/** Stops the run but keeps it resumable. */
+export class Pause extends Error {
+	constructor(public reason: string) {
+		super(reason);
+	}
+}
+
+export interface LogEntry {
+	key: string;
+	kind: "stage" | "info" | "warn" | "error" | "plan" | "review" | "done";
+	title: string;
+	body?: string;
+}
+
+export interface PipelineDeps {
+	pi: ExtensionAPI;
+	ctx: ExtensionContext;
+	dash: Dashboard;
+	signal: AbortSignal;
+}
+
+export function effectiveModel(state: RunState | undefined, cfg: Config, role: Role): RoleModel {
+	return { ...cfg.models[role], ...(state?.modelOverrides?.[role] ?? {}) };
+}
+
+function fill(template: string, vars: Record<string, string>): string {
+	return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m));
+}
+
+function guessType(title: string): string {
+	return /\b(fix|bug|crash|broken|error|regression)\b/i.test(title) ? "fix" : "feat";
+}
+
+export class Pipeline {
+	private cfg: Config;
+	private warned = false;
+
+	constructor(
+		private s: RunState,
+		private d: PipelineDeps,
+	) {
+		this.cfg = loadConfig(s.repoRoot);
+	}
+
+	// ── helpers ────────────────────────────────────────────────────────────
+
+	private log(kind: LogEntry["kind"], title: string, body?: string): void {
+		this.d.pi.appendEntry<LogEntry>("minidev", { key: this.s.key, kind, title, body });
+		if (!this.d.ctx.hasUI) process.stderr.write(`[minidev ${this.s.key}] ${title}\n`);
+	}
+
+	private save(): void {
+		saveState(this.s);
+		this.d.dash.refresh();
+	}
+
+	private checkStop(): void {
+		if (this.d.signal.aborted) throw new Pause("stopped");
+	}
+
+	private get wt(): string {
+		return this.s.worktree as string;
+	}
+
+	private async agent(role: Role, label: string, task: string): Promise<RunAgentResult> {
+		this.checkStop();
+		this.cfg = loadConfig(this.s.repoRoot); // pick up model/budget changes between calls
+		const agents = loadAgents(this.s.repoRoot);
+		const def = agents.get(role);
+		if (!def) throw new Error(`Agent definition "${role}" not found`);
+		const model = effectiveModel(this.s, this.cfg, role);
+		const remaining = this.s.budgetUsd - this.s.costUsd;
+		if (remaining <= 0) throw new Pause("budget");
+		const maxUsd = Math.min(remaining, model.maxUsdPerCall ?? Number.POSITIVE_INFINITY);
+
+		const startedAt = Date.now();
+		const runIndex = this.s.agentRuns.length + 1;
+		const fullLabel = `${String(runIndex).padStart(2, "0")}-${label}`;
+		const baseCost = this.s.costUsd;
+		this.d.dash.agentStart({ role, label, model: model.model, costUsd: 0, turns: 0, startedAt });
+
+		const r = await runAgent({
+			agent: def,
+			model,
+			task,
+			cwd: this.wt,
+			workDir: path.join(this.s.runDir, "agents"),
+			label: fullLabel,
+			signal: this.d.signal,
+			maxUsd,
+			isolate: this.cfg.subagent.isolate,
+			extraArgs: this.cfg.subagent.extraArgs,
+			onEvent: (e) => {
+				if (e.type === "tool") this.d.dash.push(e.summary);
+				else if (e.type === "retry") this.d.dash.push(`↻ ${e.message}`);
+				else if (e.type === "text") this.d.dash.push(`» ${e.text.split("\n").find((l) => l.trim()) ?? ""}`);
+				else if (e.type === "usage") {
+					this.s.costUsd = baseCost + e.costUsd;
+					this.d.dash.agentUpdate({ costUsd: e.costUsd, turns: e.turns, model: e.model ?? model.model });
+				}
+			},
+		});
+		this.d.dash.agentEnd();
+		this.s.costUsd = baseCost + r.costUsd;
+		this.s.agentRuns.push({
+			role,
+			label,
+			model: r.model,
+			costUsd: r.costUsd,
+			turns: r.turns,
+			ok: r.ok,
+			startedAt,
+			endedAt: Date.now(),
+			transcript: r.transcript,
+		});
+		this.save();
+
+		const frac = this.s.costUsd / this.s.budgetUsd;
+		if (!this.warned && frac >= this.cfg.budget.warnAt) {
+			this.warned = true;
+			this.notify(`Budget ${Math.round(frac * 100)}% used (${fmtUsd(this.s.costUsd)} of ${fmtUsd(this.s.budgetUsd)})`, "warning");
+		}
+		if (r.aborted) throw new Pause("stopped");
+		if (r.budgetExceeded) {
+			throw new Pause(this.s.costUsd >= this.s.budgetUsd ? "budget" : `per-call cap for ${role} (${fmtUsd(maxUsd)})`);
+		}
+		return r;
+	}
+
+	private notify(msg: string, type: "info" | "warning" | "error" = "info"): void {
+		if (this.d.ctx.hasUI) this.d.ctx.ui.notify(msg, type);
+		else process.stderr.write(`[minidev] ${msg}\n`);
+	}
+
+	private async checks(which: "subtask" | "final", label: string): Promise<CheckResult[]> {
+		this.checkStop();
+		const list = this.cfg.checks[which];
+		const hasTests = await G.hasUnitTests(this.wt);
+		this.d.dash.setNote(`checks: ${list.map((c) => c.name).join(", ")}`);
+		const res = await runChecks(list, this.wt, path.join(this.s.runDir, "logs"), label, {
+			hasTests,
+			signal: this.d.signal,
+			onLine: (name, l) => this.d.dash.push(`[${name}] ${l}`),
+		});
+		this.checkStop();
+		for (const r of res) {
+			this.s.checks.push({ name: r.name, ok: r.ok, skipped: r.skipped, blocking: r.blocking, durationMs: r.durationMs, logPath: r.logPath });
+		}
+		this.save();
+		return res;
+	}
+
+	private async commit(message: string): Promise<string | null> {
+		const sha = await G.commitAll(this.wt, message);
+		if (sha) this.d.dash.push(`commit ${sha} ${message}`);
+		return sha;
+	}
+
+	private async choose(title: string, options: string[], headless: string): Promise<string> {
+		if (!this.d.ctx.hasUI) return headless;
+		this.d.dash.waiting(title);
+		const pick = await this.d.ctx.ui.select(title, options);
+		this.checkStop();
+		return pick ?? options[options.length - 1];
+	}
+
+	// ── run ────────────────────────────────────────────────────────────────
+
+	async run(): Promise<void> {
+		const s = this.s;
+		s.status = "running";
+		s.pauseReason = undefined;
+		s.error = undefined;
+		this.d.dash.attach(s);
+		this.save();
+		try {
+			for (const stage of STAGES) {
+				if (s.completed.includes(stage)) continue;
+				s.stage = stage;
+				this.save();
+				this.d.dash.stage(stage);
+				this.log("stage", `▶ ${stage}`);
+				await this.stages[stage]();
+				s.completed.push(stage);
+				this.save();
+			}
+			s.status = "done";
+			this.save();
+			const summary = [
+				`Branch: \`${s.branch}\``,
+				`Worktree: \`${s.worktree}\``,
+				s.prUrl ? `PR: ${s.prUrl}` : s.pushed ? "Pushed (no PR command ran)" : "Not pushed",
+				`Cost: ${fmtUsd(s.costUsd)} (${s.agentRuns.length} agent runs)`,
+				`Artifacts: \`${s.runDir}\``,
+			].join("\n");
+			this.log("done", `✓ ${s.key} done`, summary);
+			this.notify(`minidev ${s.key} done${s.prUrl ? ` — ${s.prUrl}` : ""}`);
+		} catch (err) {
+			if (err instanceof Pause || this.d.signal.aborted) {
+				s.status = "paused";
+				s.pauseReason = err instanceof Pause ? err.reason : "stopped";
+				this.log("warn", `⏸ paused at ${s.stage}: ${s.pauseReason}`, `Resume with \`/minidev resume ${s.key}\`${s.pauseReason === "budget" ? ` (raise the cap first: \`/minidev budget <usd>\`)` : ""}`);
+				this.notify(`minidev ${s.key} paused: ${s.pauseReason}`, "warning");
+			} else {
+				s.status = "failed";
+				s.error = (err as Error).stack ?? String(err);
+				this.log("error", `✗ ${s.stage} failed`, `\`\`\`\n${(err as Error).message}\n\`\`\`\nResume with \`/minidev resume ${s.key}\``);
+				this.notify(`minidev ${s.key} failed at ${s.stage}: ${(err as Error).message}`, "error");
+			}
+			for (const t of s.subtasks) if (t.status === "running") t.status = "pending";
+			this.save();
+		} finally {
+			this.d.dash.detach();
+		}
+	}
+
+	private stages: Record<Stage, () => Promise<void>> = {
+		workspace: () => this.workspace(),
+		scout: () => this.scout(),
+		plan: () => this.plan(),
+		build: () => this.build(),
+		test: () => this.test(),
+		review: () => this.review(),
+		pr: () => this.pr(),
+	};
+
+	// ── stages ─────────────────────────────────────────────────────────────
+
+	private async workspace(): Promise<void> {
+		const s = this.s;
+		const g = this.cfg.git;
+		writeFile(artifact(s, "ticket.md"), ticketMarkdown(s.ticket));
+		s.base = s.base ?? (await G.detectBase(s.repoRoot, g.remote, g.baseBranch));
+		if (g.fetch) {
+			this.d.dash.setNote(`git fetch ${g.remote} ${s.base}`);
+			if (!(await G.fetchRemote(s.repoRoot, g.remote, s.base))) this.d.dash.push(`fetch ${g.remote} failed — using local refs`);
+		}
+		s.baseRef = s.baseRef ?? (await G.resolveBaseRef(s.repoRoot, g.remote, s.base));
+		s.branch =
+			s.branch ??
+			fill(g.branchTemplate, { key: s.key, slug: slugify(s.title), type: guessType(s.title) }).replace(/[^\w./-]+/g, "-");
+		s.worktree = s.worktree ?? path.join(g.worktreeRoot, s.repoName, s.key);
+		const how = await G.ensureWorktree(s.repoRoot, s.worktree, s.branch, s.baseRef);
+		const copied = G.copyIntoWorktree(s.repoRoot, s.worktree, g.copyIntoWorktree);
+		this.save();
+		this.log(
+			"info",
+			`worktree ${how}`,
+			`\`${s.worktree}\` on \`${s.branch}\` from \`${s.baseRef}\`${copied.length ? `\nCopied: ${copied.join(", ")}` : ""}`,
+		);
+	}
+
+	private async scout(): Promise<void> {
+		const r = await this.agent("scout", "scout", P.scoutTask(this.s));
+		if (!r.ok) throw new Error(`scout failed: ${r.error}`);
+		writeFile(artifact(this.s, "context.md"), r.output);
+		this.log("info", `scout ✓ ${fmtUsd(r.costUsd)}`, r.output);
+	}
+
+	private parsePlan(text: string): PlanJson {
+		const plan = extractJson<PlanJson>(text);
+		if (!plan || !Array.isArray(plan.subtasks) || plan.subtasks.length === 0) throw new Error("plan JSON has no subtasks");
+		plan.subtasks = plan.subtasks.slice(0, this.cfg.limits.maxSubtasks).map((t, i) => ({
+			...t,
+			id: t.id || `S${i + 1}`,
+			title: t.title || `Subtask ${i + 1}`,
+			goal: t.goal || t.title || "",
+		}));
+		return plan;
+	}
+
+	private applyPlan(plan: PlanJson, markdown: string): void {
+		const s = this.s;
+		s.plan = plan;
+		s.subtasks = plan.subtasks.map((t) => ({ ...t, status: "pending", attempts: 0 }) as Subtask);
+		writeFile(artifact(s, "plan.md"), markdown);
+		writeFile(artifact(s, "plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
+		this.save();
+	}
+
+	private planMarkdown(plan: PlanJson, prose: string): string {
+		const subtasks = plan.subtasks
+			.map(
+				(t) =>
+					`### ${t.id}: ${t.title}\n${t.goal}\n${t.files?.length ? `\nFiles: ${t.files.map((f) => `\`${f}\``).join(", ")}\n` : ""}${t.steps?.length ? `\n${t.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}\n` : ""}${t.acceptance?.length ? `\nAcceptance:\n${t.acceptance.map((x) => `- ${x}`).join("\n")}\n` : ""}`,
+			)
+			.join("\n");
+		return `${prose}\n\n## Subtasks (${plan.subtasks.length})\n\n${subtasks}`;
+	}
+
+	private async runPlanner(feedback?: { previous: string; notes: string }): Promise<void> {
+		const r = await this.agent("planner", feedback ? "planner-revise" : "planner", P.plannerTask(this.s, this.cfg, feedback));
+		if (!r.ok) throw new Error(`planner failed: ${r.error}`);
+		let plan: PlanJson;
+		let text = r.output;
+		try {
+			plan = this.parsePlan(text);
+		} catch (err) {
+			this.d.dash.push(`plan JSON invalid (${(err as Error).message}) — asking planner to re-emit`);
+			const fix = await this.agent(
+				"planner",
+				"planner-json",
+				`Your previous plan output did not contain a valid JSON block (${(err as Error).message}). Re-emit ONLY the final \`\`\`json block in the required shape for this plan:\n\n${text}`,
+			);
+			plan = this.parsePlan(fix.output);
+		}
+		const md = this.planMarkdown(plan, stripJsonBlocks(text));
+		this.applyPlan(plan, md);
+		this.log("plan", `plan ✓ ${plan.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}`, md);
+	}
+
+	private async plan(): Promise<void> {
+		const s = this.s;
+		if (!s.plan) await this.runPlanner();
+		if (!this.cfg.gates.plan || s.planApproved) return;
+		if (!this.d.ctx.hasUI) throw new Pause("awaiting plan approval");
+		for (;;) {
+			const pick = await this.choose(
+				`Plan for ${s.key}: ${s.subtasks.length} subtasks (spent ${fmtUsd(s.costUsd)}). Proceed?`,
+				["Approve & build", "Edit plan JSON", "Re-plan with feedback", "Pause"],
+				"Pause",
+			);
+			if (pick === "Approve & build") break;
+			if (pick === "Pause") throw new Pause("awaiting plan approval");
+			if (pick === "Edit plan JSON") {
+				const edited = await this.d.ctx.ui.editor("Edit plan (JSON)", JSON.stringify(s.plan, null, 2));
+				if (!edited) continue;
+				try {
+					const plan = this.parsePlan(`\`\`\`json\n${edited}\n\`\`\``);
+					const prose = stripJsonBlocks(readFileOr(artifact(s, "plan.md"), "")).split("\n## Subtasks")[0];
+					const md = this.planMarkdown(plan, prose);
+					this.applyPlan(plan, md);
+					this.log("plan", `plan edited · ${plan.subtasks.length} subtasks`, md);
+				} catch (err) {
+					this.notify(`Invalid plan JSON: ${(err as Error).message}`, "error");
+				}
+			}
+			if (pick === "Re-plan with feedback") {
+				const notes = await this.d.ctx.ui.editor("What should the planner change?", "");
+				if (!notes?.trim()) continue;
+				await this.runPlanner({ previous: readFileOr(artifact(s, "plan.md"), ""), notes });
+			}
+		}
+		s.planApproved = true;
+		this.save();
+	}
+
+	private async build(): Promise<void> {
+		const s = this.s;
+		const lim = this.cfg.limits;
+		for (const t of s.subtasks) {
+			if (t.status === "done") continue;
+			const resumed = t.attempts > 0 && (await G.hasChanges(this.wt));
+			t.status = "running";
+			this.save();
+			let failure: string | undefined;
+			let ok = false;
+			while (!ok) {
+				for (let i = 0; i < lim.subtaskAttempts && !ok; i++) {
+					t.attempts++;
+					this.save();
+					const r = await this.agent(
+						"builder",
+						`build-${t.id}${t.attempts > 1 ? `-try${t.attempts}` : ""}`,
+						P.builderSubtaskTask(s, this.cfg, t, failure, resumed && i === 0),
+					);
+					t.summary = r.output;
+					if (!r.ok) {
+						failure = `The builder process ended with an error: ${r.error}`;
+						continue;
+					}
+					const res = await this.checks("subtask", `${t.id}-try${t.attempts}`);
+					if (res.every((c) => c.ok || !c.blocking)) ok = true;
+					else failure = failuresReport(res);
+				}
+				if (ok) break;
+				const pick = await this.choose(
+					`${t.id} "${t.title}" still failing after ${t.attempts} attempts`,
+					[`Retry ${lim.subtaskAttempts} more times`, "Accept as-is & continue", "Pause"],
+					"Pause",
+				);
+				if (pick === "Pause") {
+					t.status = "failed";
+					this.log("warn", `${t.id} failing`, failure);
+					throw new Pause(`${t.id} failing checks`);
+				}
+				if (pick === "Accept as-is & continue") break;
+			}
+			if (this.cfg.git.commitPerSubtask) {
+				t.commit = (await this.commit(fill(this.cfg.git.subtaskCommitTemplate, { key: s.key, id: t.id, title: t.title }))) ?? undefined;
+			}
+			t.status = "done";
+			this.save();
+			this.log("info", `${t.id} ✓ ${t.title}${t.commit ? ` (${t.commit})` : ""}${ok ? "" : " ⚠ checks failing"}`, t.summary);
+		}
+		if (!this.cfg.git.commitPerSubtask) await this.commit(fill(this.cfg.git.commitTemplate, { key: s.key, title: s.title }));
+	}
+
+	/** Run final checks; on blocking failure, let the builder fix, up to fixRounds. */
+	private async finalChecksWithFixes(label: string): Promise<CheckResult[]> {
+		const s = this.s;
+		for (;;) {
+			const res = await this.checks("final", `${label}-${s.fixRounds}`);
+			const failing = res.filter((r) => !r.ok && r.blocking);
+			if (!failing.length) return res;
+			if (s.fixRounds >= this.cfg.limits.fixRounds) {
+				const pick = await this.choose(
+					`Checks still failing (${failing.map((f) => f.name).join(", ")}) after ${s.fixRounds} fix rounds`,
+					["One more fix round", "Continue anyway", "Pause"],
+					"Pause",
+				);
+				if (pick === "Pause") throw new Pause(`checks failing: ${failing.map((f) => f.name).join(", ")}`);
+				if (pick === "Continue anyway") return res;
+			}
+			s.fixRounds++;
+			this.save();
+			const r = await this.agent("builder", `fix-checks-${s.fixRounds}`, P.fixTask(s, this.cfg, failuresReport(res), "checks"));
+			if (r.ok) await this.commit(`${s.key}: fix ${failing.map((f) => f.name).join(", ")}`);
+		}
+	}
+
+	private async test(): Promise<void> {
+		const s = this.s;
+		const hasTests = await G.hasUnitTests(this.wt);
+		const mode = this.cfg.tests.write;
+		const write = mode === "always" || (mode === "auto" && hasTests);
+		let report = "";
+		if (write) {
+			const r = await this.agent("tester", "tester", P.testerTask(s, this.cfg, hasTests));
+			report = r.output;
+			if (r.ok) await this.commit(`${s.key}: add unit tests`);
+			this.log("info", `tester ${r.ok ? "✓" : "✗"} ${fmtUsd(r.costUsd)}`, r.output);
+		} else {
+			report = `No unit tests written (tests.write=${mode}, repo has unit tests: ${hasTests}).`;
+			this.log("info", "tester skipped", report);
+		}
+		const res = await this.finalChecksWithFixes("final");
+		const table = res.map((r) => `- ${r.name}: ${r.skipped ? "skipped" : r.ok ? "pass" : r.blocking ? "**FAIL**" : "fail (non-blocking)"}`).join("\n");
+		writeFile(artifact(s, "test-report.md"), `${report}\n\n## Checks\n${table}\n`);
+		this.log("info", "checks", table);
+	}
+
+	private async review(): Promise<void> {
+		const s = this.s;
+		while (s.reviewRounds <= this.cfg.limits.reviewRounds) {
+			const r = await this.agent("reviewer", `review-${s.reviewRounds + 1}`, P.reviewerTask(s));
+			let review: Review;
+			try {
+				review = extractJson<Review>(r.output);
+				review.mustFix = Array.isArray(review.mustFix) ? review.mustFix : [];
+				if (review.verdict !== "changes") review.verdict = review.mustFix.length ? "changes" : "approve";
+			} catch {
+				review = { verdict: "approve", summary: "Reviewer did not return a structured verdict; see review.md.", mustFix: [] };
+			}
+			s.review = review;
+			writeFile(artifact(s, "review.md"), r.output);
+			this.save();
+			this.log("review", `review: ${review.verdict} (${review.mustFix.length} must-fix) · ${fmtUsd(r.costUsd)}`, stripJsonBlocks(r.output));
+			if (review.verdict === "approve" || !review.mustFix.length) return;
+			if (s.reviewRounds >= this.cfg.limits.reviewRounds) return; // out of rounds: findings go into the PR body
+			s.reviewRounds++;
+			this.save();
+			const fx = await this.agent("builder", `fix-review-${s.reviewRounds}`, P.fixTask(s, this.cfg, P.reviewFindings(review), "review"));
+			if (fx.ok) await this.commit(`${s.key}: address review`);
+			await this.finalChecksWithFixes("post-review");
+			// Next loop iteration re-reviews only if more review rounds remain.
+			if (s.reviewRounds >= this.cfg.limits.reviewRounds) {
+				s.review = { ...review, summary: `${review.summary}\n\nMust-fix items were addressed in a follow-up commit.` };
+				this.save();
+				return;
+			}
+		}
+	}
+
+	private async resolvePrCommand(): Promise<string> {
+		const c = this.cfg.pr.command;
+		if (c !== "auto") return c;
+		const url = (await G.remoteUrl(this.s.repoRoot, this.cfg.git.remote)) ?? "";
+		const has = async (bin: string) => (await exec("which", [bin], { cwd: this.wt })).code === 0;
+		if (/github/i.test(url) && (await has("gh"))) {
+			return "gh pr create --title {title} --body-file {bodyFile} --base {base} --head {branch} {draft}";
+		}
+		if (/gitlab/i.test(url) && (await has("glab"))) {
+			return 'glab mr create --title {title} --description "$(cat {bodyFile})" --target-branch {base} --source-branch {branch} {draft} --yes';
+		}
+		return "";
+	}
+
+	private async pr(): Promise<void> {
+		const s = this.s;
+		if (await G.hasChanges(this.wt)) await this.commit(`${s.key}: remaining changes`);
+		const diffStat = await G.diffStat(this.wt, s.baseRef as string);
+		if (!diffStat.trim()) throw new Error(`No changes on ${s.branch} relative to ${s.baseRef}`);
+		const lintFail = s.checks.filter((c) => !c.ok && !c.blocking && !c.skipped).map((c) => c.name);
+		const body = P.prBody(s, {
+			diffStat,
+			testReport: readFileOr(artifact(s, "test-report.md"), ""),
+			lint: lintFail.length ? `⚠️ Non-blocking checks failing: ${[...new Set(lintFail)].join(", ")}` : undefined,
+		});
+		const bodyFile = artifact(s, "pr-body.md");
+		writeFile(bodyFile, body);
+		const title = s.plan?.prTitle ? `${s.key}: ${s.plan.prTitle}` : `${s.key}: ${s.title}`;
+		const cmdTemplate = await this.resolvePrCommand();
+		this.log("info", `PR ready: ${title}`, `${body}\n\n---\nCommits:\n\`\`\`\n${await G.commitLog(this.wt, s.baseRef as string)}\n\`\`\``);
+
+		let doPr = this.cfg.pr.push;
+		if (this.cfg.gates.pr && !s.prApproved) {
+			if (!this.d.ctx.hasUI) throw new Pause("awaiting PR approval");
+			const opts = cmdTemplate ? ["Push & open PR", "Push only", "Keep local (pause)"] : ["Push", "Keep local (pause)"];
+			const pick = await this.choose(`${title} — total ${fmtUsd(s.costUsd)}`, opts, "Keep local (pause)");
+			if (pick.startsWith("Keep local")) throw new Pause("awaiting PR approval");
+			doPr = pick === "Push & open PR";
+			if (pick === "Push only" || pick === "Push") {
+				await G.push(this.wt, this.cfg.git.remote, s.branch as string);
+				s.pushed = true;
+				this.save();
+				return;
+			}
+		}
+		if (!this.cfg.pr.push) return;
+		this.d.dash.setNote(`git push ${this.cfg.git.remote} ${s.branch}`);
+		await G.push(this.wt, this.cfg.git.remote, s.branch as string);
+		s.pushed = true;
+		this.save();
+		if (!doPr || !cmdTemplate) return;
+		const cmd = fill(cmdTemplate, {
+			title: shellQuote(title),
+			bodyFile: shellQuote(bodyFile),
+			base: shellQuote(s.base as string),
+			branch: shellQuote(s.branch as string),
+			remote: shellQuote(this.cfg.git.remote),
+			draft: this.cfg.pr.draft ? "--draft" : "",
+		});
+		this.d.dash.setNote("opening PR");
+		const r = await sh(cmd, { cwd: this.wt, timeoutMs: 120_000 });
+		if (r.code !== 0) throw new Error(`PR command failed: ${(r.stderr || r.stdout).trim()}\nCommand: ${cmd}`);
+		s.prUrl = /(https?:\/\/\S+)/.exec(r.stdout)?.[1] ?? r.stdout.trim();
+		this.save();
+	}
+}
+
+export function removeWorktree(state: RunState): Promise<unknown> {
+	if (!state.worktree || !fs.existsSync(state.worktree)) return Promise.resolve();
+	return exec("git", ["worktree", "remove", "--force", state.worktree], { cwd: state.repoRoot });
+}
