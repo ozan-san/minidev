@@ -124,7 +124,7 @@ export function summarizeJournal(entries: JournalEntry[]): JournalSummary {
 	return {
 		entries: entries.length,
 		lastSeq: entries.at(-1)?.seq ?? 0,
-		checkpoints: entries.filter((e) => e.type === "checkpoint" && e.item).map((e) => e.item as string),
+		checkpoints: [...new Set(entries.filter((e) => e.type === "checkpoint" && e.item).map((e) => e.item as string))],
 		inFlight: inFlightOwners(entries).map((o) => o.item ?? o.requestId),
 		completed: entries.filter((e) => e.type === "agent_finished" && e.ok).length,
 		lastAt: entries.at(-1)?.ts,
