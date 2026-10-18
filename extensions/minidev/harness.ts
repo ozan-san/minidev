@@ -17,6 +17,7 @@ import {
 	ROOT_CONVERSATION_ID,
 	createRegistry,
 	createSession,
+	watchEvents,
 	type Conversation,
 	type EntryId,
 	type EntryRecord,
@@ -37,9 +38,11 @@ import type { RoleModel } from "./config.ts";
 import {
 	callCost,
 	countAssistants,
+	assistantMessage,
 	lastAssistant,
 	loadProjectContext,
 	sessionDir,
+	summarizeTool,
 	toolSelection,
 	totalCost,
 } from "./harness-util.ts";
@@ -126,6 +129,15 @@ function parseId(value: string | null): SubmissionId | undefined {
 	const id = Number(value);
 	// `SubmissionId` is a branded number, so a valid numeric ledger value is a submission id.
 	return Number.isInteger(id) ? (id as SubmissionId) : undefined;
+}
+
+/** A promise plus its resolver, for waking a `Promise.race` from an event listener. */
+function deferred<T = void>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
 }
 
 /** One open pi-durable Harness per run, driven call by call. */
@@ -407,18 +419,78 @@ export class AgentHarness {
 			};
 		}
 
-		const settled = await submission.wait(BACKGROUND_CONTEXT);
-		return this.finalize({
-			o,
-			base,
-			attempt,
-			submissionId,
-			transcript,
-			usageBase,
-			settled,
-			budgetExceeded: false,
-			aborted: o.signal?.aborted === true,
+		const stream = await watchEvents(this.harness, (await this.root()).id, BACKGROUND_CONTEXT);
+		let liveTurns = 0;
+		let budgetExceeded = false;
+		let aborted = false;
+		const breached = deferred();
+		const stopped = deferred();
+
+		// The listener runs on the commit line, so it must never call a Session or conversation API (that would
+		// deadlock); it only records live state, emits dashboard events and wakes the race below.
+		const onAbort = () => stopped.resolve();
+		if (o.signal?.aborted) onAbort();
+		else o.signal?.addEventListener("abort", onAbort, { once: true });
+
+		stream.start(async (events) => {
+			for (const e of events) {
+				switch (e.type) {
+					case "usage_changed": {
+						const costUsd = totalCost(e.usage) - usageBase;
+						o.onEvent?.({ type: "usage", costUsd, turns: liveTurns, model: o.model.model });
+						if (costUsd >= o.maxUsd && !budgetExceeded) {
+							budgetExceeded = true;
+							breached.resolve();
+						}
+						break;
+					}
+					case "tool_execution_start":
+						o.onEvent?.({ type: "tool", name: e.toolName, summary: summarizeTool(e.toolName, e.args) });
+						break;
+					case "auto_retry_start":
+						o.onEvent?.({ type: "retry", message: `retry ${e.attempt}: ${e.errorMessage}` });
+						break;
+					case "message_end": {
+						if (assistantMessage(e.entry)) {
+							liveTurns += 1;
+							o.onEvent?.({ type: "text", text: lastAssistant([e.entry])?.text ?? "" });
+						}
+						break;
+					}
+				}
+			}
 		});
+
+		try {
+			const outcome = await Promise.race([
+				submission.wait(BACKGROUND_CONTEXT).then((settled) => ({ kind: "settled" as const, settled })),
+				breached.promise.then(() => ({ kind: "budget" as const })),
+				stopped.promise.then(() => ({ kind: "aborted" as const })),
+			]);
+			let settled: SettledSubmissionRecord;
+			if (outcome.kind === "settled") {
+				settled = outcome.settled;
+				aborted = o.signal?.aborted === true;
+			} else {
+				aborted = outcome.kind === "aborted";
+				await (await this.root()).abort(BACKGROUND_CONTEXT);
+				settled = await submission.wait(BACKGROUND_CONTEXT);
+			}
+			return await this.finalize({
+				o,
+				base,
+				attempt,
+				submissionId,
+				transcript,
+				usageBase,
+				settled,
+				budgetExceeded,
+				aborted,
+			});
+		} finally {
+			await stream.stop().catch(() => undefined);
+			o.signal?.removeEventListener("abort", onAbort);
+		}
 	}
 
 	/** Read the run's call ledger without submitting anything. */
