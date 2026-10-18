@@ -457,38 +457,44 @@ export class Pipeline {
 		this.save();
 	}
 
+	/** Run the builder on `t` up to `limits.subtaskAttempts` times; returns the failure report, or undefined when its blocking checks pass. */
+	private async runSubtaskAttempts(t: Subtask, resumed: boolean): Promise<string | undefined> {
+		let failure: string | undefined;
+		for (let i = 0; i < this.cfg.limits.subtaskAttempts; i++) {
+			t.attempts++;
+			this.save();
+			const r = await this.agent(
+				"builder",
+				`build-${t.id}${t.attempts > 1 ? `-try${t.attempts}` : ""}`,
+				P.builderSubtaskTask(this.s, this.cfg, t, failure, resumed && i === 0),
+			);
+			t.summary = r.output;
+			if (!r.ok) {
+				failure = `The builder process ended with an error: ${r.error}`;
+				continue;
+			}
+			const res = await this.checks("subtask", `${t.id}-try${t.attempts}`);
+			if (res.every((c) => c.ok || !c.blocking)) return undefined;
+			failure = failuresReport(res);
+		}
+		return failure;
+	}
+
 	private async build(): Promise<void> {
 		const s = this.s;
-		const lim = this.cfg.limits;
 		for (const t of s.subtasks) {
 			if (t.status === "done") continue;
 			const resumed = t.attempts > 0 && (await G.hasChanges(this.wt));
 			t.status = "running";
 			this.save();
-			let failure: string | undefined;
 			let ok = false;
 			while (!ok) {
-				for (let i = 0; i < lim.subtaskAttempts && !ok; i++) {
-					t.attempts++;
-					this.save();
-					const r = await this.agent(
-						"builder",
-						`build-${t.id}${t.attempts > 1 ? `-try${t.attempts}` : ""}`,
-						P.builderSubtaskTask(s, this.cfg, t, failure, resumed && i === 0),
-					);
-					t.summary = r.output;
-					if (!r.ok) {
-						failure = `The builder process ended with an error: ${r.error}`;
-						continue;
-					}
-					const res = await this.checks("subtask", `${t.id}-try${t.attempts}`);
-					if (res.every((c) => c.ok || !c.blocking)) ok = true;
-					else failure = failuresReport(res);
-				}
+				const failure = await this.runSubtaskAttempts(t, resumed);
+				ok = failure === undefined;
 				if (ok) break;
 				const pick = await this.choose(
 					`${t.id} "${t.title}" still failing after ${t.attempts} attempts`,
-					[`Retry ${lim.subtaskAttempts} more times`, "Accept as-is & continue", "Pause"],
+					[`Retry ${this.cfg.limits.subtaskAttempts} more times`, "Accept as-is & continue", "Pause"],
 					"Pause",
 				);
 				if (pick === "Pause") {
