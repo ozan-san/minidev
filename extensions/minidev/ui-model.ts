@@ -1,4 +1,4 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { STAGES, type RunState, type Stage } from "./state.ts";
 import { fmtDuration, fmtUsd } from "./util.ts";
 
@@ -144,6 +144,113 @@ export function renderWidget(v: DashboardView, th: Theme): string[] {
 	}
 
 	if (s.prUrl) out.push(`${th.fg("success", "PR")} ${s.prUrl}`);
+	return out;
+}
+
+export function renderDetail(v: DashboardView, th: Theme): string[] {
+	const s = v.state;
+	const out: string[] = [];
+	const statusColor =
+		s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
+
+	out.push(
+		`${th.fg("accent", th.bold(`minidev ${s.key}`))} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}`,
+	);
+	out.push(
+		`${th.fg(statusColor, s.status)} ${th.fg("dim", "@")} ${th.fg("toolTitle", s.stage)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}${s.error ? th.fg("error", ` — ${s.error.split("\n")[0]}`) : ""}`,
+	);
+
+	const pipeline = pipelineChips(s)
+		.map(({ stage, status }) => {
+			if (status === "done") return th.fg("success", `✓ ${stage}`);
+			if (status === "failed") return th.fg("error", `✗ ${stage}`);
+			if (status === "paused") return th.fg("warning", `⏸ ${stage}`);
+			if (status === "active") return th.fg("accent", `⏳ ${stage}`);
+			return th.fg("dim", `· ${stage}`);
+		})
+		.join(th.fg("dim", "  "));
+	out.push(pipeline);
+
+	const ratio = s.costUsd / Math.max(s.budgetUsd, 0.0001);
+	const pct = Math.round(ratio * 100);
+	const level = budgetLevel(s.costUsd, s.budgetUsd);
+	const costColor = level === "ok" ? "toolOutput" : level === "warn" ? "warning" : "error";
+	out.push(
+		`${th.fg("muted", "cost")} ${th.fg(costColor, `${progressBar(ratio, 10)} ${fmtUsd(s.costUsd)} / ${fmtUsd(s.budgetUsd)} (${pct}%)`)}`,
+	);
+
+	if (s.subtasks.length) {
+		const done = s.subtasks.filter((t) => t.status === "done").length;
+		out.push("", `${th.fg("muted", `Subtasks ${done}/${s.subtasks.length}`)}`);
+		for (const t of s.subtasks) {
+			const color: ThemeColor =
+				t.status === "done"
+					? "success"
+					: t.status === "running"
+						? "accent"
+						: t.status === "failed"
+							? "error"
+							: "dim";
+			const icon = t.status === "done" ? "✓" : t.status === "running" ? "▶" : t.status === "failed" ? "✗" : "·";
+			out.push(`  ${th.fg(color, icon)} ${t.id} ${t.title} · ${t.attempts} attempts${t.commit ? ` · ${t.commit}` : ""}`);
+		}
+	}
+
+	out.push("", `${th.fg("muted", `Agents (${s.agentRuns.length + (v.agent ? 1 : 0)})`)}`);
+	for (const run of s.agentRuns) {
+		out.push(`  ${th.fg(run.ok ? "success" : "error", agentSummary(run, v.now))}`);
+	}
+	if (v.agent) {
+		out.push(
+			`${th.fg("accent", "▶")} ${th.fg("toolTitle", `${v.agent.role} ${v.agent.label}`)} ${th.fg("muted", `${v.agent.turns} turns · ${fmtUsd(v.agent.costUsd)} · ${fmtDuration(v.now - v.agent.startedAt)}`)}`,
+		);
+	}
+	if (!s.agentRuns.length && !v.agent) out.push(th.fg("dim", "  (none yet)"));
+
+	if (s.checks.length) {
+		out.push(`${th.fg("muted", "Checks")}`);
+		for (const r of s.checks) {
+			const color: ThemeColor = r.skipped ? "dim" : r.ok ? "success" : "error";
+			out.push(
+				`  ${th.fg(color, `${r.ok ? "✓" : "✗"} ${r.name}${r.skipped ? " (skipped)" : ""} · ${fmtDuration(r.durationMs)}`)}`,
+			);
+		}
+	}
+
+	out.push("", `${th.fg("muted", `Activity (${v.log.length})`)}`);
+	for (const e of v.log.slice(-200)) {
+		let color: ThemeColor = "dim";
+		let icon = "";
+		switch (e.kind) {
+			case "text":
+				color = "toolOutput";
+				icon = "» ";
+				break;
+			case "retry":
+				color = "warning";
+				icon = "↻ ";
+				break;
+			case "check":
+				color = "toolOutput";
+				icon = e.text.includes("✗") ? "✗ " : "✓ ";
+				break;
+			case "commit":
+				color = "accent";
+				icon = "● ";
+				break;
+			case "tool":
+			case "info":
+				break;
+		}
+		out.push(`  ${th.fg(color, icon + e.text)}`);
+	}
+
+	out.push("", `${th.fg("muted", "Artifacts")}`);
+	if (s.worktree) out.push(`  ${th.fg("dim", s.worktree)}`);
+	if (s.runDir) out.push(`  ${th.fg("dim", s.runDir)}`);
+	if (s.prUrl) out.push(`  ${th.fg("dim", s.prUrl)}`);
+
+	out.push("", th.fg("dim", "esc close · ↑/↓ line · pgUp/pgDn page"));
 	return out;
 }
 
