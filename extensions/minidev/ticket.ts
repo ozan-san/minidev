@@ -57,6 +57,24 @@ Title:
 ## Notes
 `;
 
+/** Drop "##" sections whose content is only blank lines or bare "-" bullets (unfilled template sections). */
+function dropEmptySections(body: string): string {
+	const lines = body.split("\n");
+	const out: string[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (/^##/.test(lines[i])) {
+			let j = i + 1;
+			while (j < lines.length && /^\s*-?\s*$/.test(lines[j])) j++;
+			if (j === lines.length || /^##/.test(lines[j])) {
+				i = j - 1;
+				continue;
+			}
+		}
+		out.push(lines[i]);
+	}
+	return out.join("\n").trim();
+}
+
 /** Parse pasted ticket text. Accepts "Key:"/"Title:" headers, otherwise uses the first line as title. */
 export function parseTicketText(text: string): Omit<Ticket, "source"> {
 	const lines = text.replace(/\r\n/g, "\n").split("\n");
@@ -76,7 +94,7 @@ export function parseTicketText(text: string): Omit<Ticket, "source"> {
 		title = (first ?? "Untitled change").replace(/^#+\s*/, "").trim().slice(0, 120);
 	}
 	// Drop empty template sections.
-	body = body.replace(/^##[^\n]*\n(?:\s*-?\s*\n)*(?=##|$)/gm, "").trim();
+	body = dropEmptySections(body);
 	return { key: sanitizeKey(key) || generateKey(), title, body };
 }
 
