@@ -83,6 +83,9 @@ switch branches or write outside the worktree. The orchestrator owns git.
 Headless: `pi -p "/minidev run ticket.md"` runs to the first gate and exits; `pi -p "/minidev approve KEY"` continues.
 Set `gates.plan/pr = false` for fully unattended runs.
 
+The footer shows the running minidev version and short commit via the `minidev-version` status (e.g. `v0.1.0 (abc1234)`);
+the run panel and the `/minidev ui details` header repeat it.
+
 ## Budget
 
 `budget.maxUsdPerRun` (default $10) is a hard cap over all agents of a run. Cost is tracked from OpenRouter usage on
@@ -170,6 +173,7 @@ extensions/minidev/
   prompts.ts    task prompts per stage + PR body
   ticket.ts     ticket sources (manual, file; Jira slot)
   ui-model.ts   pure widget/detail renderers + formatting (unit-tested)
+  version.ts    package version + short git commit shown in the TUI
   config.ts state.ts ui.ts agents.ts util.ts
   durable.ts    pi-durable journal: request ids, replay, checkpoints, orphan reaping
 agents/         role contracts (scout, planner, builder, tester, reviewer)
