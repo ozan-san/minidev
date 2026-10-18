@@ -23,12 +23,23 @@ export interface Check {
 	command: string;
 	/** Failing a non-blocking check is reported but does not trigger fixes or stop the run. */
 	blocking?: boolean;
-	/** "hasTests": only run when the repo contains JVM unit tests (src/test/). */
+	/** "hasTests": only run when the repo contains unit tests (pattern depends on the detected stack). */
 	when?: "always" | "hasTests";
 	timeoutSec?: number;
 }
 
+export type StackSetting = "auto" | "android" | "ios" | "typescript" | "generic";
+
+export interface ChecksConfig {
+	/** Run after every builder subtask. Failures are fed back to the builder. */
+	subtask?: Check[];
+	/** Run after testing and after review fixes. */
+	final?: Check[];
+}
+
 export interface Config {
+	/** Project mode. "auto" explores the repo at the start of a run (see stack.ts). */
+	stack: StackSetting;
 	models: Record<Role, RoleModel>;
 	budget: {
 		/** Hard cap for one ticket run (all agents). The run pauses when reached. */
@@ -68,14 +79,17 @@ export interface Config {
 		command: string;
 		draft: boolean;
 	};
-	checks: {
-		/** Run after every builder subtask. Failures are fed back to the builder. */
-		subtask: Check[];
-		/** Run after testing and after review fixes. */
-		final: Check[];
-	};
+	/**
+	 * Explicit checks — override everything detected. Usually set per repo in .minidev.json.
+	 * Leave unset to use stack detection (or `stacks.<id>.checks`).
+	 */
+	checks?: ChecksConfig;
+	/** Explicit setup commands for a fresh worktree (dependency install, project generation). */
+	setup?: string[];
+	/** Per-stack overrides, handy in ~/.minidev/config.json (e.g. your usual Gradle tasks). */
+	stacks?: Partial<Record<Exclude<StackSetting, "auto">, { checks?: ChecksConfig; setup?: string[] }>>;
 	tests: {
-		/** Whether the tester agent writes new unit tests. "auto": only if the repo already has unit tests. */
+		/** Whether the tester agent writes new unit tests. "auto": only if the repo already has unit tests (stack-aware). */
 		write: "auto" | "always" | "never";
 	};
 	limits: {
@@ -100,9 +114,8 @@ export interface Config {
 	runsDir: string;
 }
 
-const GRADLE = "./gradlew --console=plain";
-
 export const DEFAULT_CONFIG: Config = {
+	stack: "auto",
 	models: {
 		scout: { model: "openrouter/deepseek/deepseek-v4.1-flash", thinking: "medium" },
 		planner: { model: "openrouter/anthropic/claude-opus-5.5", thinking: "high" },
@@ -121,17 +134,9 @@ export const DEFAULT_CONFIG: Config = {
 		subtaskCommitTemplate: "{key}: {title}",
 		commitPerSubtask: true,
 		worktreeRoot: "~/.minidev/worktrees",
-		copyIntoWorktree: ["local.properties"],
+		copyIntoWorktree: ["local.properties", ".env", ".env.local", "Config/Secrets.xcconfig"],
 	},
 	pr: { push: true, command: "auto", draft: true },
-	checks: {
-		subtask: [{ name: "assemble", command: `${GRADLE} assembleDebug`, blocking: true, timeoutSec: 1800 }],
-		final: [
-			{ name: "assemble", command: `${GRADLE} assembleDebug`, blocking: true, timeoutSec: 1800 },
-			{ name: "unit-tests", command: `${GRADLE} testDebugUnitTest`, blocking: true, when: "hasTests", timeoutSec: 2400 },
-			{ name: "lint", command: `${GRADLE} lintDebug`, blocking: false, timeoutSec: 1800 },
-		],
-	},
 	tests: { write: "auto" },
 	limits: { maxSubtasks: 12, subtaskAttempts: 3, fixRounds: 3, reviewRounds: 1 },
 	subagent: { isolate: true, extraArgs: [] },

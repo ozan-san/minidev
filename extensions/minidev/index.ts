@@ -6,6 +6,7 @@
  *   /minidev approve [KEY]                         approve a pending plan/PR gate and resume
  *   /minidev status                                list runs for this repo
  *   /minidev stop                                  stop the active run (resumable)
+ *   /minidev detect                                show which mode (stack) minidev picks for this repo
  *   /minidev models [role model[:thinking]]        show / change per-role models
  *   /minidev budget <usd> [default]                change the active run's (or default) budget
  *   /minidev clean <KEY>                           remove a run's worktree
@@ -21,6 +22,8 @@ import { effectiveModel, Pipeline, removeWorktree, type LogEntry } from "./pipel
 import { listRuns, loadState, runDirFor, saveState, type RunState } from "./state.ts";
 import { ISSUE_KEY_RE, parseTicketText, resolveTicket, sanitizeKey, TICKET_TEMPLATE, type Ticket } from "./ticket.ts";
 import { Dashboard } from "./ui.ts";
+import { describeStack, detectStack, effectiveChecks } from "./stack.ts";
+import * as os from "node:os";
 import { fmtUsd } from "./util.ts";
 
 interface Active {
@@ -29,7 +32,7 @@ interface Active {
 	done: Promise<void>;
 }
 
-const SUBCOMMANDS = ["run", "resume", "approve", "status", "stop", "models", "budget", "clean", "config"];
+const SUBCOMMANDS = ["run", "resume", "approve", "status", "stop", "detect", "models", "budget", "clean", "config"];
 
 export default function minidev(pi: ExtensionAPI) {
 	// Never register inside our own subagent processes.
@@ -279,7 +282,7 @@ export default function minidev(pi: ExtensionAPI) {
 		if (!runs.length) return ctx.ui.notify("minidev: no runs for this repo", "info");
 		const lines = runs.map((r) => {
 			const done = r.subtasks.filter((t) => t.status === "done").length;
-			return `${active?.state.key === r.key ? "▶ " : ""}${r.key} · ${r.status}${r.pauseReason ? ` (${r.pauseReason})` : ""} @ ${r.stage} · ${done}/${r.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}/${fmtUsd(r.budgetUsd)}${r.prUrl ? ` · ${r.prUrl}` : ""}\n   ${r.title}`;
+			return `${active?.state.key === r.key ? "▶ " : ""}${r.key} · ${r.status}${r.pauseReason ? ` (${r.pauseReason})` : ""} @ ${r.stage} · ${done}/${r.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}/${fmtUsd(r.budgetUsd)}${r.prUrl ? ` · ${r.prUrl}` : ""}\n   ${r.title}${r.stack ? ` [${r.stack.label}]` : ""}`;
 		});
 		pi.appendEntry<LogEntry>("minidev", { key: path.basename(repoRoot), kind: "info", title: `${runs.length} run(s)`, body: lines.map((l) => `- ${l}`).join("\n") });
 	}
@@ -287,7 +290,7 @@ export default function minidev(pi: ExtensionAPI) {
 	// ── commands ─────────────────────────────────────────────────────────────
 
 	pi.registerCommand("minidev", {
-		description: "Ticket → PR pipeline: run | resume | approve | status | stop | models | budget | clean | config",
+		description: "Ticket → PR pipeline: run | resume | approve | status | stop | detect | models | budget | clean | config",
 		getArgumentCompletions: (prefix) => {
 			const parts = prefix.split(/\s+/);
 			if (parts.length <= 1) return SUBCOMMANDS.filter((s) => s.startsWith(parts[0] ?? "")).map((s) => ({ value: s, label: s }));
@@ -324,6 +327,19 @@ export default function minidev(pi: ExtensionAPI) {
 					active.controller.abort();
 					await active.done;
 					return;
+				case "detect": {
+					const repoRoot = await repoOrFail(ctx);
+					if (!repoRoot) return;
+					const cfg = loadConfig(repoRoot);
+					const st = await detectStack(repoRoot, { forced: cfg.stack, derivedData: path.join(os.tmpdir(), "minidev-detect-dd") });
+					pi.appendEntry<LogEntry>("minidev", {
+						key: path.basename(repoRoot),
+						kind: "plan",
+						title: `mode: ${st.label}`,
+						body: `${describeStack(st, effectiveChecks(cfg, st))}\n\nAgent guidance: \`agents/stacks/${st.id}.md\`. Override with \`"stack"\` in ${PROJECT_CONFIG}.`,
+					});
+					return;
+				}
 				case "models":
 					return cmdModels(rest, ctx);
 				case "budget":

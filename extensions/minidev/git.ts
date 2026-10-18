@@ -92,9 +92,3 @@ export async function push(wt: string, remote: string, branch: string): Promise<
 	const r = await exec("git", ["push", "-u", remote, branch], { cwd: wt, timeoutMs: 300_000 });
 	if (r.code !== 0) throw new Error(`git push failed: ${(r.stderr || r.stdout).trim()}`);
 }
-
-/** True if the worktree tracks JVM unit tests (src/test/...). */
-export async function hasUnitTests(wt: string): Promise<boolean> {
-	const files = (await gitTry(wt, ["ls-files"])) ?? "";
-	return /(^|\/)src\/test(?:[A-Z]\w*)?\//m.test(files);
-}

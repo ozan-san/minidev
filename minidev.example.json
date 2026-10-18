@@ -1,4 +1,5 @@
 {
+  "stack": "auto",
   "models": {
     "scout": { "model": "openrouter/deepseek/deepseek-v4.1-flash", "thinking": "medium" },
     "planner": { "model": "openrouter/anthropic/claude-opus-5.5", "thinking": "high", "maxUsdPerCall": 3 },
@@ -15,24 +16,37 @@
     "subtaskCommitTemplate": "{key}: {title}",
     "commitPerSubtask": true,
     "worktreeRoot": "~/.minidev/worktrees",
-    "copyIntoWorktree": ["local.properties", "app/google-services.json"]
+    "copyIntoWorktree": ["local.properties", ".env", ".env.local", "app/google-services.json"]
   },
-  "pr": {
-    "push": true,
-    "command": "auto",
-    "draft": true
+  "pr": { "push": true, "command": "auto", "draft": true },
+
+  "//": "Per-mode defaults — best placed in ~/.minidev/config.json so they apply to all repos of that kind.",
+  "stacks": {
+    "android": {
+      "checks": {
+        "subtask": [{ "name": "compile", "command": "./gradlew --console=plain :app:compileFreeDebugKotlin", "timeoutSec": 1200 }],
+        "final": [
+          { "name": "assemble", "command": "./gradlew --console=plain assembleFreeDebug" },
+          { "name": "unit-tests", "command": "./gradlew --console=plain testFreeDebugUnitTest", "when": "hasTests" },
+          { "name": "detekt", "command": "./gradlew --console=plain detekt", "blocking": false }
+        ]
+      }
+    },
+    "ios": {
+      "checks": {
+        "subtask": [{ "name": "build", "command": "set -o pipefail; xcodebuild -workspace App.xcworkspace -scheme App -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO build" }],
+        "final": [
+          { "name": "build", "command": "set -o pipefail; xcodebuild -workspace App.xcworkspace -scheme App -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO build" },
+          { "name": "test", "command": "set -o pipefail; xcodebuild -workspace App.xcworkspace -scheme App -destination 'platform=iOS Simulator,name=iPhone 16' -quiet CODE_SIGNING_ALLOWED=NO test", "when": "hasTests" }
+        ]
+      },
+      "setup": ["bundle exec pod install"]
+    }
   },
-  "checks": {
-    "subtask": [
-      { "name": "compile", "command": "./gradlew --console=plain :app:compileDebugKotlin", "timeoutSec": 1200 }
-    ],
-    "final": [
-      { "name": "assemble", "command": "./gradlew --console=plain assembleDebug", "timeoutSec": 1800 },
-      { "name": "unit-tests", "command": "./gradlew --console=plain testDebugUnitTest", "when": "hasTests" },
-      { "name": "detekt", "command": "./gradlew --console=plain detekt", "blocking": false },
-      { "name": "lint", "command": "./gradlew --console=plain lintDebug", "blocking": false }
-    ]
-  },
+
+  "//checks": "Repo-level 'checks' / 'setup' override everything above and detection, e.g. in <repo>/.minidev.json:",
+  "//example": { "checks": { "final": [{ "name": "ci", "command": "make ci" }] }, "setup": ["make bootstrap"] },
+
   "tests": { "write": "auto" },
   "limits": { "maxSubtasks": 12, "subtaskAttempts": 3, "fixRounds": 3, "reviewRounds": 1 },
   "subagent": { "isolate": true, "extraArgs": [] }

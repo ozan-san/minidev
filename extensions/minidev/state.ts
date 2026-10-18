@@ -1,10 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Role, RoleModel } from "./config.ts";
+import type { ScoutCommands, StackInfo } from "./stack.ts";
 import type { Ticket } from "./ticket.ts";
 import { ensureDir, writeFile } from "./util.ts";
 
-export const STAGES = ["workspace", "scout", "plan", "build", "test", "review", "pr"] as const;
+export const STAGES = ["workspace", "detect", "scout", "plan", "build", "test", "review", "pr"] as const;
 export type Stage = (typeof STAGES)[number];
 
 export interface Subtask {
@@ -74,6 +75,10 @@ export interface RunState {
 	base?: string;
 	/** Ref the branch was cut from / diffed against, e.g. "origin/main". */
 	baseRef?: string;
+	/** Detected project mode (set in the detect stage). */
+	stack?: StackInfo;
+	/** Commands proposed by the scout. */
+	scoutCommands?: ScoutCommands;
 	stage: Stage;
 	completed: Stage[];
 	status: RunStatus;

@@ -56,7 +56,8 @@ export async function runChecks(
 				if (last) opts.onLine?.(c.name, last);
 			},
 		});
-		const output = `$ ${c.command}\n${r.stdout}\n${r.stderr}`;
+		// Strip ANSI colors so error extraction and agent-facing tails stay clean.
+		const output = `$ ${c.command}\n${r.stdout}\n${r.stderr}`.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 		fs.writeFileSync(logPath, output, "utf-8");
 		const errors = extractErrors(output);
 		results.push({

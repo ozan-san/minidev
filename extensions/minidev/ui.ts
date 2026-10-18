@@ -113,7 +113,7 @@ export class Dashboard {
 		const statusColor = s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
 
 		line(
-			`${th.fg("accent", th.bold("minidev"))} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}  ${th.fg(statusColor, s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
+			`${th.fg("accent", th.bold("minidev"))} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}  ${th.fg(statusColor, s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
 		);
 
 		const pipeline = STAGES.map((st) => {

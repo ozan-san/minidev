@@ -1,5 +1,6 @@
 import type { Config } from "./config.ts";
 import type { PlanJson, Review, RunState, Subtask } from "./state.ts";
+import { effectiveChecks } from "./stack.ts";
 import { artifact } from "./state.ts";
 import { fmtUsd } from "./util.ts";
 
@@ -13,11 +14,23 @@ const files = (s: RunState) => ({
 	planJson: artifact(s, "plan.json"),
 });
 
-const subtaskCheckCmds = (cfg: Config) => cfg.checks.subtask.map((c) => `\`${c.command}\``).join(", ") || "(none configured)";
+const cmds = (list: { command: string; blocking?: boolean }[]) =>
+	list
+		.filter((c) => c.blocking !== false)
+		.map((c) => `\`${c.command}\``)
+		.join(", ");
+const subtaskCheckCmds = (s: RunState, cfg: Config) =>
+	cmds(effectiveChecks(cfg, s.stack).subtask) || "nothing (no build command known — verify your change yourself as described in the task)";
+const finalCheckCmds = (s: RunState, cfg: Config) => cmds(effectiveChecks(cfg, s.stack).final) || "nothing (no checks known)";
 
-export function scoutTask(s: RunState): string {
+const stackLine = (s: RunState) => (s.stack ? `Project mode: ${s.stack.label}\n` : "");
+
+export function scoutTask(s: RunState, cfg: Config): string {
 	const f = files(s);
+	const checks = effectiveChecks(cfg, s.stack);
+	const known = [...checks.subtask, ...checks.final].map((c) => `- ${c.name}: \`${c.command}\``);
 	return `Investigate this repository for the ticket below. Working directory: ${s.worktree}
+${stackLine(s)}${known.length ? `Build/test commands minidev already detected (confirm or correct them in your JSON):\n${[...new Set(known)].join("\n")}\n` : "minidev could NOT detect build/test commands for this repo — finding them is part of your job (see the JSON block).\n"}
 
 Ticket (also at ${f.ticket}):
 ---
@@ -31,14 +44,15 @@ Return your findings in the required format.`;
 export function plannerTask(s: RunState, cfg: Config, feedback?: { previous: string; notes: string }): string {
 	const f = files(s);
 	return `Create the implementation plan for this ticket. Working directory: ${s.worktree}
-
+${stackLine(s)}
 Read these first:
 - Ticket: ${f.ticket}
 - Scout findings: ${f.context}
 
 Constraints:
 - At most ${cfg.limits.maxSubtasks} subtasks.
-- After each subtask the orchestrator runs: ${subtaskCheckCmds(cfg)} — every subtask must leave the build green.
+- After each subtask the orchestrator runs: ${subtaskCheckCmds(s, cfg)} — every subtask must leave it passing.
+- Final checks after all subtasks: ${finalCheckCmds(s, cfg)}.
 - Test writing happens in a separate stage (from "testPlan").
 ${
 	feedback
@@ -81,7 +95,7 @@ export function builderSubtaskTask(
 	const later = s.subtasks.filter((x) => x.status !== "done" && x.id !== t.id);
 	return `Implement ONE subtask of the plan for ticket ${s.key}: "${s.title}".
 Working directory (git worktree): ${s.worktree}
-
+${stackLine(s)}
 Overall goal: ${plan.summary}
 Full plan (read only if you need more context): ${f.plan}
 Ticket: ${f.ticket}
@@ -90,7 +104,7 @@ ${done.length ? `Already done (do not redo):\n${done.map((x) => `- ${x.id}: ${x.
 ## Your subtask
 ${subtaskBlock(t)}
 
-After you finish, the orchestrator runs ${subtaskCheckCmds(cfg)}; it must pass.
+After you finish, the orchestrator runs ${subtaskCheckCmds(s, cfg)}; it must pass.
 ${partialWork ? "\nNote: the worktree may contain partial uncommitted work from an interrupted attempt at this subtask — check `git status`/`git diff` and continue from it.\n" : ""}${
 		previousFailure
 			? `
@@ -114,33 +128,31 @@ See what the branch changed with: git diff ${s.baseRef}...HEAD (plus uncommitted
 ## Problems to fix
 ${problems}
 
-Fix only these problems with minimal changes. When done, the orchestrator runs: ${cfg.checks.final
-		.filter((c) => c.blocking !== false)
-		.map((c) => `\`${c.command}\``)
-		.join(", ")}.`;
+Fix only these problems with minimal changes. When done, the orchestrator runs: ${finalCheckCmds(s, cfg)}.`;
 }
 
 export function testerTask(s: RunState, cfg: Config, hasTests: boolean): string {
 	const f = files(s);
 	const tp = s.plan?.testPlan;
 	const allowDeps = cfg.tests.write === "always" && !hasTests;
+	const testCmd = effectiveChecks(cfg, s.stack).final.find((c) => /test/i.test(c.name));
 	return `Write unit tests for the change on this branch (ticket ${s.key}: "${s.title}").
 Working directory (git worktree): ${s.worktree}
-Base: ${s.baseRef} — see changes with: git diff ${s.baseRef}...HEAD
+${stackLine(s)}${testCmd ? `Full test command (the orchestrator runs it afterwards): \`${testCmd.command}\`\n` : ""}Base: ${s.baseRef} — see changes with: git diff ${s.baseRef}...HEAD
 Ticket: ${f.ticket}
 Plan: ${f.plan}
 
 Test plan from the planner:
 ${tp?.unitTests?.length ? tp.unitTests.map((x) => `- ${x}`).join("\n") : "- (none given — cover the main new/changed logic)"}
 
-${hasTests ? "The repo already has JVM unit tests; follow their setup and style." : allowDeps ? "The repo has no JVM unit tests yet. You MAY add a minimal JUnit test setup (prefer what the version catalog already declares)." : "The repo has no JVM unit tests set up. Only add tests if the module already has test dependencies declared; otherwise report that and stop."}`;
+${hasTests ? "The repo already has unit tests; follow their setup and style." : allowDeps ? "The repo has no unit tests yet. You MAY add a minimal test setup using the stack's standard framework (prefer anything already declared in the project's dependencies)." : "The repo has no unit tests set up. Only add tests if a test framework/target is already configured; otherwise report that and stop."}`;
 }
 
 export function reviewerTask(s: RunState): string {
 	const f = files(s);
 	return `Review the branch for ticket ${s.key}: "${s.title}".
 Working directory (git worktree): ${s.worktree}
-Diff: git diff ${s.baseRef}...HEAD
+${stackLine(s)}Diff: git diff ${s.baseRef}...HEAD
 Ticket: ${f.ticket}
 Plan: ${f.plan}
 ${s.checks.length ? `\nAutomated checks (latest):\n${latestChecks(s)}\n` : ""}
@@ -161,6 +173,7 @@ export function prBody(s: RunState, opts: { diffStat: string; testReport: string
 	const plan = s.plan;
 	const lines: string[] = [];
 	lines.push(`## ${s.key}: ${s.title}`, "");
+	if (s.stack) lines.push(`<sub>${s.stack.label}</sub>`, "");
 	if (s.ticket.url) lines.push(`Ticket: ${s.ticket.url}`, "");
 	if (plan?.summary) lines.push(plan.summary, "");
 	lines.push("### Changes");

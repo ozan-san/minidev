@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadAgents } from "./agents.ts";
 import { failuresReport, runChecks, type CheckResult } from "./checks.ts";
+import * as ST from "./stack.ts";
 import { loadConfig, type Config, type Role, type RoleModel } from "./config.ts";
 import * as G from "./git.ts";
 import * as P from "./prompts.ts";
@@ -79,7 +80,7 @@ export class Pipeline {
 	private async agent(role: Role, label: string, task: string): Promise<RunAgentResult> {
 		this.checkStop();
 		this.cfg = loadConfig(this.s.repoRoot); // pick up model/budget changes between calls
-		const agents = loadAgents(this.s.repoRoot);
+		const agents = loadAgents(this.s.repoRoot, this.s.stack);
 		const def = agents.get(role);
 		if (!def) throw new Error(`Agent definition "${role}" not found`);
 		const model = effectiveModel(this.s, this.cfg, role);
@@ -148,8 +149,8 @@ export class Pipeline {
 
 	private async checks(which: "subtask" | "final", label: string): Promise<CheckResult[]> {
 		this.checkStop();
-		const list = this.cfg.checks[which];
-		const hasTests = await G.hasUnitTests(this.wt);
+		const list = ST.effectiveChecks(this.cfg, this.s.stack)[which];
+		const hasTests = await ST.hasTests(this.wt, this.s.stack);
 		this.d.dash.setNote(`checks: ${list.map((c) => c.name).join(", ")}`);
 		const res = await runChecks(list, this.wt, path.join(this.s.runDir, "logs"), label, {
 			hasTests,
@@ -230,6 +231,7 @@ export class Pipeline {
 
 	private stages: Record<Stage, () => Promise<void>> = {
 		workspace: () => this.workspace(),
+		detect: () => this.detect(),
 		scout: () => this.scout(),
 		plan: () => this.plan(),
 		build: () => this.build(),
@@ -264,11 +266,80 @@ export class Pipeline {
 		);
 	}
 
+	/** Explore the repo, pick the stack mode, run setup (dependency install / project generation). */
+	private async detect(): Promise<void> {
+		const s = this.s;
+		this.d.dash.setNote("exploring repository");
+		const derivedData = path.join(s.runDir, "DerivedData");
+		let stack = await ST.detectStack(this.wt, {
+			forced: this.cfg.stack,
+			derivedData,
+			choose: this.d.ctx.hasUI
+				? async (cands, summary) => {
+						const labels = cands.map((c) => ST.STACK_LABELS[c]);
+						const pick = await this.choose(`Several stacks match this repo:\n${summary}\n\nWhich mode should minidev use?`, labels, labels[0]);
+						return cands[labels.indexOf(pick)];
+					}
+				: undefined,
+		});
+		s.stack = stack;
+		this.save();
+
+		const setup = ST.effectiveSetup(this.cfg, stack);
+		if (setup.length) await this.runSetup(setup, "setup");
+		stack = await ST.refreshAfterSetup(this.wt, stack, derivedData);
+		s.stack = stack;
+		this.save();
+		const checks = ST.effectiveChecks(this.cfg, stack);
+		const explicit = this.cfg.checks ? " (checks from config)" : this.cfg.stacks?.[stack.id]?.checks ? ` (checks from stacks.${stack.id})` : "";
+		this.log("info", `mode: ${stack.label}${explicit}`, ST.describeStack(stack, checks));
+		if (!checks.subtask.length && !checks.final.length) this.d.dash.push("no build/test commands detected — the scout will look for them");
+	}
+
+	private async runSetup(cmds: string[], label: string): Promise<void> {
+		for (const [i, cmd] of cmds.entries()) {
+			this.checkStop();
+			const res = await runChecks([{ name: `${label}${i + 1}`, command: cmd, timeoutSec: 1800 }], this.wt, path.join(this.s.runDir, "logs"), label, {
+				hasTests: false,
+				signal: this.d.signal,
+				onLine: (_n, l) => this.d.dash.push(`[${label}] ${l}`),
+			});
+			this.checkStop();
+			const r = res[0];
+			if (r.ok) {
+				this.d.dash.push(`✓ ${cmd}`);
+				continue;
+			}
+			this.log("warn", `${label} failed: ${cmd}`, `\`\`\`\n${r.tail}\n\`\`\`\nLog: ${r.logPath}`);
+			const pick = await this.choose(`Setup command failed: ${cmd}`, ["Continue anyway", "Pause"], "Pause");
+			if (pick === "Pause") throw new Pause(`${label} failed: ${cmd}`);
+		}
+	}
+
 	private async scout(): Promise<void> {
-		const r = await this.agent("scout", "scout", P.scoutTask(this.s));
+		const s = this.s;
+		const r = await this.agent("scout", "scout", P.scoutTask(s, this.cfg));
 		if (!r.ok) throw new Error(`scout failed: ${r.error}`);
-		writeFile(artifact(this.s, "context.md"), r.output);
-		this.log("info", `scout ✓ ${fmtUsd(r.costUsd)}`, r.output);
+		writeFile(artifact(s, "context.md"), stripJsonBlocks(r.output));
+		this.log("info", `scout ✓ ${fmtUsd(r.costUsd)}`, stripJsonBlocks(r.output));
+		try {
+			s.scoutCommands = extractJson<{ commands?: ST.ScoutCommands }>(r.output).commands;
+		} catch {
+			s.scoutCommands = undefined;
+		}
+		this.save();
+		// Fall back to the scout's commands only when nothing was detected or configured.
+		const st = s.stack;
+		const cmds = s.scoutCommands;
+		if (!st || !cmds || this.cfg.checks || this.cfg.stacks?.[st.id]?.checks) return;
+		if (!ST.effectiveSetup(this.cfg, st).length && cmds.setup?.length && st.checksSource === "none") {
+			st.setup = cmds.setup;
+			await this.runSetup(cmds.setup, "scout-setup");
+		}
+		if (ST.applyScoutCommands(st, cmds)) {
+			this.save();
+			this.log("info", "using build/test commands proposed by the scout", ST.describeStack(st, ST.effectiveChecks(this.cfg, st)));
+		}
 	}
 
 	private parsePlan(text: string): PlanJson {
@@ -330,7 +401,7 @@ export class Pipeline {
 		if (!this.d.ctx.hasUI) throw new Pause("awaiting plan approval");
 		for (;;) {
 			const pick = await this.choose(
-				`Plan for ${s.key}: ${s.subtasks.length} subtasks (spent ${fmtUsd(s.costUsd)}). Proceed?`,
+				`Plan for ${s.key} [${s.stack?.label ?? "?"}]: ${s.subtasks.length} subtasks (spent ${fmtUsd(s.costUsd)}). Proceed?`,
 				["Approve & build", "Edit plan JSON", "Re-plan with feedback", "Pause"],
 				"Pause",
 			);
@@ -435,7 +506,7 @@ export class Pipeline {
 
 	private async test(): Promise<void> {
 		const s = this.s;
-		const hasTests = await G.hasUnitTests(this.wt);
+		const hasTests = await ST.hasTests(this.wt, this.s.stack);
 		const mode = this.cfg.tests.write;
 		const write = mode === "always" || (mode === "auto" && hasTests);
 		let report = "";
@@ -476,6 +547,7 @@ export class Pipeline {
 			this.save();
 			const fx = await this.agent("builder", `fix-review-${s.reviewRounds}`, P.fixTask(s, this.cfg, P.reviewFindings(review), "review"));
 			if (fx.ok) await this.commit(`${s.key}: address review`);
+			this.log("info", `review fixes ${fx.ok ? "✓" : "✗"} · ${fmtUsd(fx.costUsd)}`, fx.output);
 			await this.finalChecksWithFixes("post-review");
 			// Next loop iteration re-reviews only if more review rounds remain.
 			if (s.reviewRounds >= this.cfg.limits.reviewRounds) {
