@@ -260,16 +260,12 @@ async function typescriptProfile(s: Scan): Promise<Partial<StackInfo>> {
 	if (pm !== "npm" && !(await has(pm))) warnings.push(`${pm} not installed`);
 	facts.push(`Package manager: ${pm} (do not switch, do not create other lockfiles)`);
 
-	const install =
-		pm === "pnpm"
-			? "pnpm install --frozen-lockfile"
-			: pm === "yarn"
-				? "yarn install --frozen-lockfile || yarn install --immutable"
-				: pm === "bun"
-					? "bun install --frozen-lockfile"
-					: s.exists("package-lock.json")
-						? "npm ci"
-						: "npm install";
+	const INSTALL: Record<string, string> = {
+		pnpm: "pnpm install --frozen-lockfile",
+		yarn: "yarn install --frozen-lockfile || yarn install --immutable",
+		bun: "bun install --frozen-lockfile",
+	};
+	const install = INSTALL[pm] ?? (s.exists("package-lock.json") ? "npm ci" : "npm install");
 
 	let scripts: Record<string, string> = {};
 	let pkg: Record<string, unknown> = {};
@@ -347,6 +343,20 @@ async function genericProfile(s: Scan): Promise<Partial<StackInfo>> {
 	return { facts, setup, checks: { subtask, final }, label: flavour ? `Generic (${flavour})` : undefined };
 }
 
+interface ProfileArgs {
+	s: Scan;
+	derivedData: string;
+}
+
+type Profile = (a: ProfileArgs) => Promise<Partial<StackInfo>>;
+
+const PROFILES: Record<StackId, Profile> = {
+	android: ({ s }) => androidProfile(s),
+	ios: ({ s, derivedData }) => iosProfile(s, derivedData),
+	typescript: ({ s }) => typescriptProfile(s),
+	generic: ({ s }) => genericProfile(s),
+};
+
 // ── public API ─────────────────────────────────────────────────────────────
 
 export interface DetectOptions {
@@ -374,14 +384,7 @@ export async function detectStack(root: string, o: DetectOptions): Promise<Stack
 		id = (await o.choose(ranked, summary)) ?? ranked[0];
 	} else id = ranked[0] ?? "generic";
 
-	const profile =
-		id === "android"
-			? await androidProfile(s)
-			: id === "ios"
-				? await iosProfile(s, o.derivedData)
-				: id === "typescript"
-					? await typescriptProfile(s)
-					: await genericProfile(s);
+	const profile = await PROFILES[id]({ s, derivedData: o.derivedData });
 
 	const checks = profile.checks ?? { subtask: [], final: [] };
 	return {
