@@ -18,7 +18,7 @@ export interface CheckResult {
 }
 
 /** Gradle prints the useful part (e: file:line errors, "What went wrong") — pull it to the top. */
-function extractErrors(output: string): string {
+export function extractErrors(output: string): string {
 	const lines = output.split("\n");
 	const picked = lines.filter((l) =>
 		/^(e: |w: .*error|.*error:|FAILURE:|\* What went wrong|> Task .* FAILED|.*Exception|\s+at .*Test|.*FAILED$|Execution failed)/.test(l),
