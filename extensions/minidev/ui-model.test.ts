@@ -242,6 +242,18 @@ describe("textWidth", () => {
 		assert.equal(textWidth("\u001b[31mab\u001b[0m"), 2);
 		assert.equal(textWidth("\u001b[1;32mabc\u001b[0m"), 3);
 	});
+
+	test("counts wide glyphs and emoji as two cells", () => {
+		assert.equal(textWidth("⏳"), 2);
+		assert.equal(textWidth("中"), 2);
+		assert.equal(textWidth("あ"), 2);
+		assert.equal(textWidth("！"), 2);
+		assert.equal(textWidth("🎉"), 2);
+	});
+
+	test("treats combining marks as zero width", () => {
+		assert.equal(textWidth("e\u0301"), 1);
+	});
 });
 
 describe("truncateVisible", () => {
@@ -449,6 +461,12 @@ describe("renderWidget", () => {
 		assert.equal(borderToken(first.calls), STAGE_COLORS.workspace);
 		assert.equal(borderToken(second.calls), STAGE_COLORS.pr);
 		assert.notEqual(borderToken(first.calls), borderToken(second.calls));
+	});
+
+	test("keeps every framed line at the terminal width with wide title glyphs and an active chip", () => {
+		const state = makeState({ status: "running", stage: "build", title: "中文字幕 ⏳ テスト 🎉" });
+		const out = renderWidget(makeView({ state, width: 80 }), theme);
+		for (const line of out) assert.equal(textWidth(line), 80, `not 80 cells: ${JSON.stringify(line)}`);
 	});
 
 	test("keeps the header, pipeline, cost and activity content inside the frame", () => {
