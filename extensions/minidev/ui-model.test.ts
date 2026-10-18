@@ -10,9 +10,12 @@ import {
 	pushActivity,
 	renderDetail,
 	renderWidget,
+	shouldDismissPanel,
 	type ActivityEntry,
 	type DashboardView,
 } from "./ui-model.ts";
+import type { UiDismiss } from "./config.ts";
+import type { RunStatus } from "./state.ts";
 
 type RunState = Parameters<typeof renderWidget>[0]["state"];
 type Theme = Parameters<typeof renderWidget>[1];
@@ -162,6 +165,39 @@ describe("budgetLevel", () => {
 
 	test("classifies ratios at or above 1 as over", () => {
 		assert.equal(budgetLevel(1, 1), "over");
+	});
+});
+
+describe("shouldDismissPanel", () => {
+	const statuses: RunStatus[] = ["running", "paused", "failed", "done"];
+
+	test("with done, only a successful run is dismissed", () => {
+		assert.equal(shouldDismissPanel("done", "done"), true);
+		assert.equal(shouldDismissPanel("running", "done"), false);
+		assert.equal(shouldDismissPanel("paused", "done"), false);
+		assert.equal(shouldDismissPanel("failed", "done"), false);
+	});
+
+	test("with terminal, every non-running status is dismissed", () => {
+		assert.equal(shouldDismissPanel("done", "terminal"), true);
+		assert.equal(shouldDismissPanel("paused", "terminal"), true);
+		assert.equal(shouldDismissPanel("failed", "terminal"), true);
+		assert.equal(shouldDismissPanel("running", "terminal"), false);
+	});
+
+	test("with never, no status is dismissed", () => {
+		for (const status of statuses) assert.equal(shouldDismissPanel(status, "never"), false);
+	});
+
+	test("returns a boolean and is free of side effects", () => {
+		const policies: UiDismiss[] = ["done", "terminal", "never"];
+		for (const status of statuses) {
+			for (const policy of policies) {
+				const first = shouldDismissPanel(status, policy);
+				assert.equal(typeof first, "boolean");
+				assert.equal(shouldDismissPanel(status, policy), first);
+			}
+		}
 	});
 });
 

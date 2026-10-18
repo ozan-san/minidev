@@ -59,3 +59,38 @@ describe("durability artifacts", () => {
 		assert.match(content, /durable\.reapOrphans/);
 	});
 });
+
+describe("ui config", () => {
+	test("DEFAULT_CONFIG.ui dismisses a successful run", () => {
+		assert.deepEqual(DEFAULT_CONFIG.ui, { dismissOn: "done" });
+	});
+
+	test("a partial ui override wins without touching durable or budget defaults", () => {
+		const merged = deepMerge(DEFAULT_CONFIG, { ui: { dismissOn: "never" } });
+		assert.equal(merged.ui.dismissOn, "never");
+		assert.deepEqual(merged.durable, { replay: "safe", reapOrphans: true });
+		assert.equal(merged.budget.maxUsdPerRun, 10);
+		assert.equal(merged.budget.warnAt, 0.8);
+	});
+});
+
+describe("dismissal artifacts", () => {
+	test("minidev.example.json parses and documents the ui dismiss default", () => {
+		const cfg = JSON.parse(fs.readFileSync(EXAMPLE, "utf-8")) as { ui?: { dismissOn?: string } };
+		assert.equal(cfg.ui?.dismissOn, "done");
+	});
+
+	test("README documents ui.dismissOn and the dismiss command", () => {
+		const content = fs.readFileSync(README, "utf-8");
+		assert.match(content, /ui\.dismissOn/);
+		assert.match(content, /\/minidev ui dismiss/);
+	});
+
+	test("README still documents final PRs, journal and orphan reaping without draft-by-default", () => {
+		const content = fs.readFileSync(README, "utf-8");
+		assert.doesNotMatch(content, /draft by default/);
+		assert.match(content, /pr\.draft|final by default/);
+		assert.match(content, /\/minidev journal/);
+		assert.match(content, /durable\.reapOrphans/);
+	});
+});

@@ -1,0 +1,98 @@
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { RunState } from "./state.ts";
+
+// ui.ts only needs these two helpers from pi-tui at runtime; stub them so the
+// Dashboard can be tested without the host terminal packages installed.
+const piTuiStub = `data:text/javascript,${encodeURIComponent(
+	"export const matchesKey = (data, key) => data === key; export const truncateToWidth = (text, width) => (text.length > width ? text.slice(0, width) : text);",
+)}`;
+registerHooks({
+	resolve(specifier, context, nextResolve) {
+		if (specifier === "@earendil-works/pi-tui") return { url: piTuiStub, shortCircuit: true };
+		return nextResolve(specifier, context);
+	},
+});
+
+const { Dashboard } = await import("./ui.ts");
+
+const theme = {
+	fg: (_token: string, text: string) => text,
+	bold: (text: string) => text,
+} as unknown as Theme;
+
+const tui = { requestRender: () => {} } as unknown as TUI;
+
+function makeState(over: Partial<RunState> = {}): RunState {
+	return {
+		version: 1,
+		key: "MD-1",
+		title: "Better UI",
+		ticket: { key: "MD-1", title: "Better UI", body: "", source: "s" },
+		repoRoot: "/repo",
+		repoName: "repo",
+		runDir: "/repo/.minidev/runs/repo/MD-1",
+		stage: "pr",
+		completed: ["workspace", "detect", "scout", "plan", "build", "test", "review", "pr"],
+		status: "done",
+		budgetUsd: 10,
+		costUsd: 1,
+		subtasks: [],
+		agentRuns: [],
+		checks: [],
+		reviewRounds: 0,
+		fixRounds: 0,
+		createdAt: 1,
+		updatedAt: 1,
+		...over,
+	};
+}
+
+describe("Dashboard dismissal", () => {
+	test("an already-open details overlay still renders after dismiss", async () => {
+		let overlay: Component | undefined;
+		let customCalls = 0;
+		const ctx = {
+			mode: "rpc",
+			hasUI: true,
+			ui: {
+				setWidget: () => {},
+				setStatus: () => {},
+				custom: async (factory: (tui: TUI, theme: Theme, kb: unknown, done: () => void) => Component) => {
+					customCalls += 1;
+					overlay = factory(tui, theme, undefined, () => {});
+				},
+			},
+		} as unknown as ExtensionContext;
+
+		const dash = new Dashboard(ctx);
+		assert.equal(dash.isAttached, false);
+
+		dash.attach(makeState());
+		assert.equal(dash.isAttached, true);
+
+		await dash.openDetails();
+		const open = overlay;
+		assert.ok(open);
+		assert.equal(customCalls, 1);
+
+		dash.dismiss();
+		assert.equal(dash.isAttached, false);
+		assert.equal(dash.isVisible, false);
+
+		const handleInput = open.handleInput?.bind(open);
+		assert.ok(handleInput);
+		assert.doesNotThrow(() => open.render(80));
+		assert.doesNotThrow(() => handleInput("up"));
+
+		// A dismissed panel cannot be resurrected or opened again.
+		dash.show();
+		assert.equal(dash.isVisible, false);
+		assert.equal(dash.toggle(), false);
+		await dash.openDetails();
+		assert.equal(customCalls, 1);
+	});
+});

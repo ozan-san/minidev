@@ -11,6 +11,7 @@ import { appendJournal, inputHash, readJournal, replayResult, requestIdFor } fro
 import { runAgent, type RunAgentResult } from "./runner.ts";
 import { artifact, saveState, STAGES, type PlanJson, type Review, type RunState, type Stage, type Subtask } from "./state.ts";
 import { ticketMarkdown } from "./ticket.ts";
+import { shouldDismissPanel } from "./ui-model.ts";
 import type { Dashboard } from "./ui.ts";
 import { exec, extractJson, fmtUsd, sh, shellQuote, slugify, stripJsonBlocks, writeFile, readFileOr } from "./util.ts";
 
@@ -276,7 +277,8 @@ export class Pipeline {
 			for (const t of s.subtasks) if (t.status === "running") t.status = "pending";
 			this.save();
 		} finally {
-			this.d.dash.detach();
+			if (shouldDismissPanel(s.status, this.cfg.ui.dismissOn)) this.d.dash.dismiss();
+			else this.d.dash.detach();
 		}
 	}
 
