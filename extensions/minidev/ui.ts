@@ -1,35 +1,85 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, type TUI } from "@earendil-works/pi-tui";
-import { STAGES, type RunState, type Stage } from "./state.ts";
-import { fmtDuration, fmtUsd } from "./util.ts";
-
-export interface LiveAgent {
-	role: string;
-	label: string;
-	model: string;
-	costUsd: number;
-	turns: number;
-	startedAt: number;
-}
+import { matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { type RunState, type Stage } from "./state.ts";
+import { fmtUsd } from "./util.ts";
+import {
+	collapseActivity,
+	pushActivity,
+	renderDetail,
+	renderWidget,
+	MAX_ACTIVITY,
+	MAX_LOG,
+	type ActivityEntry,
+	type ActivityKind,
+	type DashboardView,
+	type LiveAgent,
+} from "./ui-model.ts";
 
 const WIDGET = "minidev";
-const MAX_ACTIVITY = 6;
+const MAX_VISIBLE = 22;
+
+/** Scrollable overlay showing the full run details and activity log. */
+class DetailOverlay implements Component {
+	private offset = 0;
+	private timer: NodeJS.Timeout;
+
+	constructor(
+		private tui: TUI,
+		private theme: Theme,
+		private getView: () => DashboardView,
+		private done: () => void,
+	) {
+		this.timer = setInterval(() => this.tui.requestRender(), 1000);
+		this.timer.unref();
+	}
+
+	dispose(): void {
+		clearInterval(this.timer);
+	}
+
+	invalidate(): void {}
+
+	handleInput(data: string): void {
+		const total = renderDetail(this.getView(), this.theme).length;
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
+			this.done();
+			return;
+		}
+		if (matchesKey(data, "up")) this.offset -= 1;
+		else if (matchesKey(data, "down")) this.offset += 1;
+		else if (matchesKey(data, "pageUp")) this.offset -= MAX_VISIBLE;
+		else if (matchesKey(data, "pageDown")) this.offset += MAX_VISIBLE;
+		this.offset = Math.max(0, Math.min(this.offset, Math.max(0, total - MAX_VISIBLE)));
+		this.tui.requestRender();
+	}
+
+	render(width: number): string[] {
+		return renderDetail(this.getView(), this.theme)
+			.map((line) => truncateToWidth(line, width))
+			.slice(this.offset, this.offset + MAX_VISIBLE);
+	}
+}
 
 /** Persistent dashboard above the editor + footer status. */
 export class Dashboard {
 	private tui?: TUI;
 	private state?: RunState;
 	private agent?: LiveAgent;
-	private activity: string[] = [];
+	private activity: ActivityEntry[] = [];
+	private log: ActivityEntry[] = [];
 	private note = "";
 	private startedStage = Date.now();
 	private timer?: NodeJS.Timeout;
 	private waitingSince?: number;
+	private visible = true;
 
 	constructor(private ctx: ExtensionContext) {}
 
-	attach(state: RunState): void {
-		this.state = state;
+	get isVisible(): boolean {
+		return this.visible;
+	}
+
+	private mount(): void {
 		if (this.ctx.mode !== "tui") return;
 		this.ctx.ui.setWidget(WIDGET, (tui: TUI, theme: Theme) => {
 			this.tui = tui;
@@ -38,17 +88,66 @@ export class Dashboard {
 				invalidate: () => {},
 			};
 		});
-		// Tick for elapsed timers.
-		this.timer = setInterval(() => this.refresh(), 1000);
-		this.timer.unref();
+		if (!this.timer) {
+			// Tick for elapsed timers.
+			this.timer = setInterval(() => this.refresh(), 1000);
+			this.timer.unref();
+		}
+	}
+
+	private unmount(): void {
+		if (this.timer) clearInterval(this.timer);
+		this.timer = undefined;
+		if (this.ctx.mode === "tui") this.ctx.ui.setWidget(WIDGET, undefined);
+	}
+
+	attach(state: RunState): void {
+		this.state = state;
+		this.activity = [];
+		this.log = [];
+		this.note = "";
+		this.startedStage = Date.now();
+		this.visible = true;
+		this.mount();
 	}
 
 	detach(keepSummary = true): void {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
 		this.agent = undefined;
-		if (!keepSummary) this.ctx.ui.setWidget(WIDGET, undefined);
+		if (!keepSummary) this.hide();
+		else this.refresh();
+	}
+
+	hide(): void {
+		this.visible = false;
+		if (this.timer) clearInterval(this.timer);
+		this.timer = undefined;
+		if (this.ctx.hasUI) {
+			this.ctx.ui.setWidget(WIDGET, undefined);
+			this.ctx.ui.setStatus(WIDGET, undefined);
+		}
+	}
+
+	show(): void {
+		if (!this.state) return;
+		this.visible = true;
+		this.mount();
 		this.refresh();
+	}
+
+	toggle(): boolean {
+		if (this.visible) this.hide();
+		else this.show();
+		return this.visible;
+	}
+
+	async openDetails(): Promise<void> {
+		if (!this.state || !this.ctx.hasUI) return;
+		await this.ctx.ui.custom<void>((tui, theme, _kb, done) => new DetailOverlay(tui, theme, () => this.view(), done), {
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "80%", minWidth: 60, maxHeight: 26 },
+		});
 	}
 
 	stage(_stage: Stage): void {
@@ -90,74 +189,38 @@ export class Dashboard {
 		this.refresh();
 	}
 
-	push(line: string): void {
-		this.activity.push(line.replace(/\s+/g, " ").trim());
-		if (this.activity.length > MAX_ACTIVITY) this.activity.shift();
+	push(text: string, kind: ActivityKind = "info"): void {
+		const collapsed = collapseActivity(text);
+		if (!collapsed) return;
+		const entry: ActivityEntry = { kind, text: collapsed, agent: this.agent?.label };
+		this.activity = pushActivity(this.activity, entry, MAX_ACTIVITY);
+		this.log = pushActivity(this.log, entry, MAX_LOG);
 		this.refresh();
+	}
+
+	private view(): DashboardView {
+		return {
+			state: this.state as RunState,
+			agent: this.agent,
+			activity: this.activity,
+			log: this.log,
+			note: this.note,
+			startedStage: this.startedStage,
+			waitingSince: this.waitingSince,
+			now: Date.now(),
+		};
 	}
 
 	refresh(): void {
 		const s = this.state;
-		if (s && this.ctx.hasUI) {
+		if (this.visible && s && this.ctx.hasUI) {
 			const pct = s.budgetUsd > 0 ? Math.round((s.costUsd / s.budgetUsd) * 100) : 0;
 			this.ctx.ui.setStatus(WIDGET, `minidev ${s.key} · ${s.stage} · ${fmtUsd(s.costUsd)}/${fmtUsd(s.budgetUsd)} (${pct}%)`);
 		}
-		this.tui?.requestRender();
+		if (this.visible) this.tui?.requestRender();
 	}
 
 	private render(width: number, th: Theme): string[] {
-		const s = this.state;
-		if (!s) return [];
-		const out: string[] = [];
-		const line = (t: string) => out.push(truncateToWidth(t, width));
-		const statusColor = s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
-
-		line(
-			`${th.fg("accent", th.bold("minidev"))} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}  ${th.fg(statusColor, s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
-		);
-
-		const pipeline = STAGES.map((st) => {
-			if (s.completed.includes(st)) return th.fg("success", `✓ ${st}`);
-			if (st === s.stage) {
-				const icon = s.status === "running" ? "⏳" : s.status === "failed" ? "✗" : "⏸";
-				return th.fg(s.status === "failed" ? "error" : "accent", `${icon} ${st}`);
-			}
-			return th.fg("dim", `· ${st}`);
-		}).join(th.fg("dim", "  "));
-		line(pipeline);
-
-		if (s.subtasks.length && (s.stage === "build" || s.completed.includes("build"))) {
-			const done = s.subtasks.filter((t) => t.status === "done").length;
-			const chips = s.subtasks
-				.map((t) =>
-					t.status === "done"
-						? th.fg("success", t.id)
-						: t.status === "running"
-							? th.fg("accent", `[${t.id}]`)
-							: t.status === "failed"
-								? th.fg("error", t.id)
-								: th.fg("dim", t.id),
-				)
-				.join(" ");
-			line(`${th.fg("muted", `subtasks ${done}/${s.subtasks.length}`)} ${chips}`);
-		}
-
-		const budget = `${fmtUsd(s.costUsd)} / ${fmtUsd(s.budgetUsd)}`;
-		const over = s.costUsd / Math.max(s.budgetUsd, 0.0001);
-		line(`${th.fg("muted", "cost")} ${th.fg(over >= 1 ? "error" : over >= 0.8 ? "warning" : "toolOutput", budget)}`);
-
-		if (this.agent) {
-			const a = this.agent;
-			line(
-				`${th.fg("accent", "▶")} ${th.fg("toolTitle", a.label)} ${th.fg("dim", a.model)} ${th.fg("muted", `${a.turns} turns · ${fmtUsd(a.costUsd)} · ${fmtDuration(Date.now() - a.startedAt)}`)}`,
-			);
-		} else if (s.status === "running" && this.waitingSince) {
-			line(th.fg("warning", this.note));
-		} else if (s.status === "running") {
-			line(`${th.fg("accent", "▶")} ${th.fg("muted", `${this.note || s.stage} · ${fmtDuration(Date.now() - this.startedStage)}`)}`);
-		}
-		for (const a of this.activity) line(`  ${th.fg("dim", a)}`);
-		if (s.prUrl) line(`${th.fg("success", "PR")} ${s.prUrl}`);
-		return out;
+		return renderWidget(this.view(), th).map((line) => truncateToWidth(line, width));
 	}
 }

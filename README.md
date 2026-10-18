@@ -9,6 +9,7 @@ minidev explores the repo first and switches mode for **Android**, **iOS / Swift
 /minidev run ABC-123         # same, key prefilled (Jira source not wired yet)
 /minidev run ./ticket.md     # from a file
 /ticket …                    # alias for /minidev run
+/minidev ui [show|hide|toggle|details]   # show/hide the minidev panel or open the details overlay
 ```
 
 ## Pipeline
@@ -16,6 +17,14 @@ minidev explores the repo first and switches mode for **Android**, **iOS / Swift
 ```
 workspace → detect → scout → plan → [approve plan] → build S1..Sn → test ⇄ fix → review → fix → [approve PR] → push + PR
 ```
+
+## Panel
+
+While a run is active, minidev shows a live widget above the editor plus a status line in the footer with
+the current stage, cost and agent. Press `ctrl+shift+m` to toggle the panel (or use `/minidev ui show`,
+`/minidev ui hide`, `/minidev ui toggle`). `/minidev ui details` opens a scrollable overlay (close with
+`esc`) listing stages, subtasks, agent runs, checks and the full activity log. The panel stays visible after
+a run ends — until you dismiss it.
 
 ## Modes (stack detection)
 
@@ -60,6 +69,7 @@ switch branches or write outside the worktree. The orchestrator owns git.
 | `/minidev stop` | stop the active run (kills subagents; resumable) |
 | `/minidev status` | runs for this repo |
 | `/minidev detect` | show the mode, setup and checks minidev would use here |
+| `/minidev ui [show\|hide\|toggle\|details]` | show/hide the live panel or open the details overlay |
 | `/minidev models` | pick model + thinking per role (default or "this run only"); applies from the next call |
 | `/minidev models builder openrouter/deepseek/deepseek-v4.1-flash:high` | non-interactive |
 | `/minidev budget <usd> [KEY\|default]` | raise a run's cap / set default cap |
@@ -138,6 +148,7 @@ extensions/minidev/
   git.ts        worktree, commit, push
   prompts.ts    task prompts per stage + PR body
   ticket.ts     ticket sources (manual, file; Jira slot)
+  ui-model.ts   pure widget/detail renderers + formatting (unit-tested)
   config.ts state.ts ui.ts agents.ts util.ts
 agents/         role contracts (scout, planner, builder, tester, reviewer)
 agents/stacks/  per-mode guidance (android, ios, typescript, generic)
