@@ -1,6 +1,6 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { UiDismiss } from "./config.ts";
-import { STAGES, type RunState, type RunStatus, type Stage } from "./state.ts";
+import { STAGES, type RunState, type RunStatus, type Stage, type Subtask } from "./state.ts";
 import { textWidth, truncateVisible } from "./text-width.ts";
 import { fmtDuration, fmtUsd } from "./util.ts";
 
@@ -114,17 +114,14 @@ export function frameLines(lines: string[], th: Theme, opts: { color: ThemeColor
 	return [border(`╭${bar}╮`), ...body, border(`╰${bar}╯`)];
 }
 
-export function renderWidget(v: DashboardView, th: Theme): string[] {
-	const s = v.state;
-	const out: string[] = [];
-	const statusColor =
-		s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
+/** Color for a run status badge. */
+function statusColor(status: RunStatus): ThemeColor {
+	return status === "failed" ? "error" : status === "paused" ? "warning" : status === "done" ? "success" : "accent";
+}
 
-	out.push(
-		`${th.fg("accent", th.bold("minidev"))}${v.version ? ` ${th.fg("dim", v.version)}` : ""} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}  ${th.fg(statusColor, s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
-	);
-
-	const pipeline = pipelineChips(s)
+/** Render the stage pipeline as colored chips on one line. */
+function pipelineLine(state: RunState, th: Theme): string {
+	return pipelineChips(state)
 		.map(({ stage, status }) => {
 			if (status === "done") return th.fg("success", `✓ ${stage}`);
 			if (status === "failed") return th.fg("error", `✗ ${stage}`);
@@ -133,31 +130,39 @@ export function renderWidget(v: DashboardView, th: Theme): string[] {
 			return th.fg("dim", `· ${stage}`);
 		})
 		.join(th.fg("dim", "  "));
-	out.push(pipeline);
+}
+
+/** Render the budget progress bar and cost line. */
+function costLine(state: RunState, th: Theme): string {
+	const ratio = state.costUsd / Math.max(state.budgetUsd, 0.0001);
+	const pct = Math.round(ratio * 100);
+	const level = budgetLevel(state.costUsd, state.budgetUsd);
+	const color = level === "ok" ? "toolOutput" : level === "warn" ? "warning" : "error";
+	return `${th.fg("muted", "cost")} ${th.fg(color, `${progressBar(ratio, 10)} ${fmtUsd(state.costUsd)} / ${fmtUsd(state.budgetUsd)} (${pct}%)`)}`;
+}
+
+/** Color for a subtask status. */
+function subtaskColor(status: Subtask["status"]): ThemeColor {
+	return status === "done" ? "success" : status === "running" ? "accent" : status === "failed" ? "error" : "dim";
+}
+
+export function renderWidget(v: DashboardView, th: Theme): string[] {
+	const s = v.state;
+	const out: string[] = [];
+
+	out.push(
+		`${th.fg("accent", th.bold("minidev"))}${v.version ? ` ${th.fg("dim", v.version)}` : ""} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}  ${th.fg(statusColor(s.status), s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
+	);
+
+	out.push(pipelineLine(s, th));
 
 	if (s.subtasks.length && (s.stage === "build" || s.completed.includes("build"))) {
 		const done = s.subtasks.filter((t) => t.status === "done").length;
-		const chips = s.subtasks
-			.map((t) =>
-				t.status === "done"
-					? th.fg("success", t.id)
-					: t.status === "running"
-						? th.fg("accent", `[${t.id}]`)
-						: t.status === "failed"
-							? th.fg("error", t.id)
-							: th.fg("dim", t.id),
-			)
-			.join(" ");
+		const chips = s.subtasks.map((t) => th.fg(subtaskColor(t.status), t.status === "running" ? `[${t.id}]` : t.id)).join(" ");
 		out.push(`${th.fg("muted", `subtasks ${done}/${s.subtasks.length}`)} ${chips}`);
 	}
 
-	const ratio = s.costUsd / Math.max(s.budgetUsd, 0.0001);
-	const pct = Math.round(ratio * 100);
-	const level = budgetLevel(s.costUsd, s.budgetUsd);
-	const costColor = level === "ok" ? "toolOutput" : level === "warn" ? "warning" : "error";
-	out.push(
-		`${th.fg("muted", "cost")} ${th.fg(costColor, `${progressBar(ratio, 10)} ${fmtUsd(s.costUsd)} / ${fmtUsd(s.budgetUsd)} (${pct}%)`)}`,
-	);
+	out.push(costLine(s, th));
 
 	const last = v.activity[v.activity.length - 1];
 	if (v.agent) {
@@ -195,47 +200,23 @@ export function renderWidget(v: DashboardView, th: Theme): string[] {
 export function renderDetail(v: DashboardView, th: Theme): string[] {
 	const s = v.state;
 	const out: string[] = [];
-	const statusColor =
-		s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
 
 	out.push(
 		`${th.fg("accent", th.bold("minidev"))}${v.version ? ` ${th.fg("dim", v.version)}` : ""} ${th.fg("accent", th.bold(s.key))} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}`,
 	);
 	out.push(
-		`${th.fg(statusColor, s.status)} ${th.fg("dim", "@")} ${th.fg("toolTitle", s.stage)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}${s.error ? th.fg("error", ` — ${s.error.split("\n")[0]}`) : ""}`,
+		`${th.fg(statusColor(s.status), s.status)} ${th.fg("dim", "@")} ${th.fg("toolTitle", s.stage)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}${s.error ? th.fg("error", ` — ${s.error.split("\n")[0]}`) : ""}`,
 	);
 
-	const pipeline = pipelineChips(s)
-		.map(({ stage, status }) => {
-			if (status === "done") return th.fg("success", `✓ ${stage}`);
-			if (status === "failed") return th.fg("error", `✗ ${stage}`);
-			if (status === "paused") return th.fg("warning", `⏸ ${stage}`);
-			if (status === "active") return th.fg("accent", `⏳ ${stage}`);
-			return th.fg("dim", `· ${stage}`);
-		})
-		.join(th.fg("dim", "  "));
-	out.push(pipeline);
+	out.push(pipelineLine(s, th));
 
-	const ratio = s.costUsd / Math.max(s.budgetUsd, 0.0001);
-	const pct = Math.round(ratio * 100);
-	const level = budgetLevel(s.costUsd, s.budgetUsd);
-	const costColor = level === "ok" ? "toolOutput" : level === "warn" ? "warning" : "error";
-	out.push(
-		`${th.fg("muted", "cost")} ${th.fg(costColor, `${progressBar(ratio, 10)} ${fmtUsd(s.costUsd)} / ${fmtUsd(s.budgetUsd)} (${pct}%)`)}`,
-	);
+	out.push(costLine(s, th));
 
 	if (s.subtasks.length) {
 		const done = s.subtasks.filter((t) => t.status === "done").length;
 		out.push("", `${th.fg("muted", `Subtasks ${done}/${s.subtasks.length}`)}`);
 		for (const t of s.subtasks) {
-			const color: ThemeColor =
-				t.status === "done"
-					? "success"
-					: t.status === "running"
-						? "accent"
-						: t.status === "failed"
-							? "error"
-							: "dim";
+			const color = subtaskColor(t.status);
 			const icon = t.status === "done" ? "✓" : t.status === "running" ? "▶" : t.status === "failed" ? "✗" : "·";
 			out.push(`  ${th.fg(color, icon)} ${t.id} ${t.title} · ${t.attempts} attempts${t.commit ? ` · ${t.commit}` : ""}`);
 		}
