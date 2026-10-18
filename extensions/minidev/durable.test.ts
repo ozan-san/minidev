@@ -61,6 +61,10 @@ describe("readJournal", () => {
 		assert.deepEqual(readJournal(path.join(root, "missing", "journal.jsonl")), []);
 	});
 
+	test("returns [] for an unreadable path instead of throwing", () => {
+		assert.deepEqual(readJournal(root), []);
+	});
+
 	test("parses valid JSONL lines and skips malformed lines", () => {
 		const file = path.join(root, "mixed", "journal.jsonl");
 		fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -214,9 +218,24 @@ describe("reapOrphanedAgents", () => {
 		const result = reapOrphanedAgents(runDir, {
 			isAlive: (pid) => alive.has(pid),
 			kill: (pid) => killed.push(pid),
+			isOurs: () => true,
 		});
 		assert.deepEqual(result, [100, 200]);
 		assert.deepEqual(killed, [100, 200]);
+	});
+
+	test("does not kill a live pid that belongs to an unrelated process", () => {
+		const runDir = path.join(root, "reap-unrelated");
+		appendJournal(journalFile(runDir), { type: "agent_started", requestId: "r1", pid: 111 });
+		appendJournal(journalFile(runDir), { type: "agent_started", requestId: "r2", pid: 222 });
+		const killed: number[] = [];
+		const result = reapOrphanedAgents(runDir, {
+			isAlive: () => true,
+			kill: (pid) => killed.push(pid),
+			isOurs: (pid) => pid === 222,
+		});
+		assert.deepEqual(result, [222]);
+		assert.deepEqual(killed, [222]);
 	});
 
 	test("does not kill dead pids", () => {

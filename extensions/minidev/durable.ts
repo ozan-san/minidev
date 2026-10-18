@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -60,9 +61,9 @@ export function readJournal(file: string): JournalEntry[] {
 	let text: string;
 	try {
 		text = fs.readFileSync(file, "utf-8");
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-		throw err;
+	} catch {
+		/* a missing, unreadable or otherwise broken journal must never fail a run */
+		return [];
 	}
 	const entries: JournalEntry[] = [];
 	for (const line of text.split("\n")) {
@@ -133,7 +134,11 @@ export function summarizeJournal(entries: JournalEntry[]): JournalSummary {
 
 export function reapOrphanedAgents(
 	runDir: string,
-	opts?: { isAlive?: (pid: number) => boolean; kill?: (pid: number) => void },
+	opts?: {
+		isAlive?: (pid: number) => boolean;
+		kill?: (pid: number) => void;
+		isOurs?: (pid: number) => boolean;
+	},
 ): number[] {
 	const isAlive =
 		opts?.isAlive ??
@@ -154,9 +159,26 @@ export function reapOrphanedAgents(
 				/* gone */
 			}
 		});
+	// A recorded pid may have been recycled by an unrelated same-user process, or
+	// may belong to a subagent a concurrent pi session is actively running for the
+	// same run key. Only reap processes whose command line proves they belong to
+	// this run (the subagent is spawned with its system prompt under this runDir).
+	const isOurs =
+		opts?.isOurs ??
+		((pid: number) => {
+			try {
+				const cmd = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "command="], {
+					encoding: "utf-8",
+					stdio: ["ignore", "pipe", "ignore"],
+				});
+				return cmd.includes(runDir);
+			} catch {
+				return false;
+			}
+		});
 	const killed: number[] = [];
 	for (const owner of inFlightOwners(readJournal(journalFile(runDir)))) {
-		if (isAlive(owner.pid)) {
+		if (isAlive(owner.pid) && isOurs(owner.pid)) {
 			kill(owner.pid);
 			killed.push(owner.pid);
 		}
