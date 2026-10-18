@@ -13,11 +13,10 @@ import {
 	renderDetail,
 	renderWidget,
 	shouldDismissPanel,
-	textWidth,
-	truncateVisible,
 	type ActivityEntry,
 	type DashboardView,
 } from "./ui-model.ts";
+import { textWidth, truncateVisible } from "./text-width.ts";
 import type { UiDismiss } from "./config.ts";
 import { STAGES, type RunStatus } from "./state.ts";
 

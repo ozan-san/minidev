@@ -181,6 +181,7 @@ extensions/minidev/
   prompts.ts    task prompts per stage + PR body
   ticket.ts     ticket sources (manual, file; Jira slot)
   ui-model.ts   pure widget/detail renderers + formatting (unit-tested)
+  text-width.ts  terminal cell width + ANSI-aware clipping (unit-tested)
   version.ts    package version + short git commit shown in the TUI
   config.ts state.ts ui.ts agents.ts util.ts
 agents/         role contracts (scout, planner, builder, tester, reviewer)
