@@ -1,3 +1,4 @@
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { STAGES, type RunState, type Stage } from "./state.ts";
 import { fmtDuration, fmtUsd } from "./util.ts";
 
@@ -66,6 +67,84 @@ export function progressBar(fraction: number, width: number): string {
 	const clamped = Math.min(1, Math.max(0, fraction));
 	const filled = Math.round(clamped * width);
 	return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+export function renderWidget(v: DashboardView, th: Theme): string[] {
+	const s = v.state;
+	const out: string[] = [];
+	const statusColor =
+		s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
+
+	out.push(
+		`${th.fg("accent", th.bold("minidev"))} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}  ${th.fg(statusColor, s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
+	);
+
+	const pipeline = pipelineChips(s)
+		.map(({ stage, status }) => {
+			if (status === "done") return th.fg("success", `✓ ${stage}`);
+			if (status === "failed") return th.fg("error", `✗ ${stage}`);
+			if (status === "paused") return th.fg("warning", `⏸ ${stage}`);
+			if (status === "active") return th.fg("accent", `⏳ ${stage}`);
+			return th.fg("dim", `· ${stage}`);
+		})
+		.join(th.fg("dim", "  "));
+	out.push(pipeline);
+
+	if (s.subtasks.length && (s.stage === "build" || s.completed.includes("build"))) {
+		const done = s.subtasks.filter((t) => t.status === "done").length;
+		const chips = s.subtasks
+			.map((t) =>
+				t.status === "done"
+					? th.fg("success", t.id)
+					: t.status === "running"
+						? th.fg("accent", `[${t.id}]`)
+						: t.status === "failed"
+							? th.fg("error", t.id)
+							: th.fg("dim", t.id),
+			)
+			.join(" ");
+		out.push(`${th.fg("muted", `subtasks ${done}/${s.subtasks.length}`)} ${chips}`);
+	}
+
+	const ratio = s.costUsd / Math.max(s.budgetUsd, 0.0001);
+	const pct = Math.round(ratio * 100);
+	const level = budgetLevel(s.costUsd, s.budgetUsd);
+	const costColor = level === "ok" ? "toolOutput" : level === "warn" ? "warning" : "error";
+	out.push(
+		`${th.fg("muted", "cost")} ${th.fg(costColor, `${progressBar(ratio, 10)} ${fmtUsd(s.costUsd)} / ${fmtUsd(s.budgetUsd)} (${pct}%)`)}`,
+	);
+
+	const last = v.activity[v.activity.length - 1];
+	if (v.agent) {
+		const a = v.agent;
+		out.push(
+			`${th.fg("accent", "▶")} ${th.fg("toolTitle", a.label)} ${th.fg("dim", `${a.role} ${a.model}`)} ${th.fg("muted", `${a.turns} turns · ${fmtUsd(a.costUsd)} · ${fmtDuration(v.now - a.startedAt)}`)}`,
+		);
+		if (last) out.push(th.fg("dim", `   ↳ ${last.text}`));
+	} else if (s.status === "running" && v.waitingSince) {
+		out.push(th.fg("warning", v.note));
+	} else if (s.status === "running") {
+		out.push(`${th.fg("accent", "▶")} ${th.fg("muted", `${v.note || s.stage} · ${fmtDuration(v.now - v.startedStage)}`)}`);
+	}
+
+	const icons: Record<ActivityKind, string> = {
+		tool: "",
+		text: "» ",
+		retry: "↻ ",
+		check: "",
+		commit: "● ",
+		info: "",
+	};
+	for (const e of v.activity.slice(-MAX_ACTIVITY)) {
+		out.push(`  ${th.fg("dim", icons[e.kind] + e.text)}`);
+	}
+
+	if (v.log.length > v.activity.length) {
+		out.push(th.fg("dim", `  … ${v.log.length - v.activity.length} earlier · /minidev ui details`));
+	}
+
+	if (s.prUrl) out.push(`${th.fg("success", "PR")} ${s.prUrl}`);
+	return out;
 }
 
 export function agentSummary(
