@@ -599,6 +599,39 @@ export class Pipeline {
 		return "";
 	}
 
+	/** The push gate: whether to push and whether to open the PR. Throws Pause when the user keeps the branch local. */
+	private async prDecision(title: string, hasCommand: boolean): Promise<{ openPr: boolean; pushOnly: boolean }> {
+		if (!this.cfg.gates.pr || this.s.prApproved) return { openPr: this.cfg.pr.push, pushOnly: false };
+		if (!this.d.ctx.hasUI) throw new Pause("awaiting PR approval");
+		const opts = hasCommand ? ["Push & open PR", "Push only", "Keep local (pause)"] : ["Push", "Keep local (pause)"];
+		const pick = await this.choose(`${title} — total ${fmtUsd(this.s.costUsd)}`, opts, "Keep local (pause)");
+		if (pick.startsWith("Keep local")) throw new Pause("awaiting PR approval");
+		return { openPr: pick === "Push & open PR", pushOnly: !pick.startsWith("Push &") };
+	}
+
+	private async pushBranch(): Promise<void> {
+		this.d.dash.setNote(`git push ${this.cfg.git.remote} ${this.s.branch}`);
+		await G.push(this.wt, this.cfg.git.remote, this.s.branch as string);
+		this.s.pushed = true;
+		this.save();
+	}
+
+	private async openPr(title: string, bodyFile: string, cmdTemplate: string): Promise<void> {
+		const cmd = fill(cmdTemplate, {
+			title: shellQuote(title),
+			bodyFile: shellQuote(bodyFile),
+			base: shellQuote(this.s.base as string),
+			branch: shellQuote(this.s.branch as string),
+			remote: shellQuote(this.cfg.git.remote),
+			draft: this.cfg.pr.draft ? "--draft" : "",
+		});
+		this.d.dash.setNote("opening PR");
+		const r = await sh(cmd, { cwd: this.wt, timeoutMs: 120_000 });
+		if (r.code !== 0) throw new Error(`PR command failed: ${(r.stderr || r.stdout).trim()}\nCommand: ${cmd}`);
+		this.s.prUrl = /(https?:\/\/\S+)/.exec(r.stdout)?.[1] ?? r.stdout.trim();
+		this.save();
+	}
+
 	private async pr(): Promise<void> {
 		const s = this.s;
 		if (await G.hasChanges(this.wt)) await this.commit(`${s.key}: remaining changes`);
@@ -616,39 +649,15 @@ export class Pipeline {
 		const cmdTemplate = await this.resolvePrCommand();
 		this.log("info", `PR ready: ${title}`, `${body}\n\n---\nCommits:\n\`\`\`\n${await G.commitLog(this.wt, s.baseRef as string)}\n\`\`\``);
 
-		let doPr = this.cfg.pr.push;
-		if (this.cfg.gates.pr && !s.prApproved) {
-			if (!this.d.ctx.hasUI) throw new Pause("awaiting PR approval");
-			const opts = cmdTemplate ? ["Push & open PR", "Push only", "Keep local (pause)"] : ["Push", "Keep local (pause)"];
-			const pick = await this.choose(`${title} — total ${fmtUsd(s.costUsd)}`, opts, "Keep local (pause)");
-			if (pick.startsWith("Keep local")) throw new Pause("awaiting PR approval");
-			doPr = pick === "Push & open PR";
-			if (pick === "Push only" || pick === "Push") {
-				await G.push(this.wt, this.cfg.git.remote, s.branch as string);
-				s.pushed = true;
-				this.save();
-				return;
-			}
+		const gate = await this.prDecision(title, Boolean(cmdTemplate));
+		if (gate.pushOnly) {
+			await this.pushBranch();
+			return;
 		}
 		if (!this.cfg.pr.push) return;
-		this.d.dash.setNote(`git push ${this.cfg.git.remote} ${s.branch}`);
-		await G.push(this.wt, this.cfg.git.remote, s.branch as string);
-		s.pushed = true;
-		this.save();
-		if (!doPr || !cmdTemplate) return;
-		const cmd = fill(cmdTemplate, {
-			title: shellQuote(title),
-			bodyFile: shellQuote(bodyFile),
-			base: shellQuote(s.base as string),
-			branch: shellQuote(s.branch as string),
-			remote: shellQuote(this.cfg.git.remote),
-			draft: this.cfg.pr.draft ? "--draft" : "",
-		});
-		this.d.dash.setNote("opening PR");
-		const r = await sh(cmd, { cwd: this.wt, timeoutMs: 120_000 });
-		if (r.code !== 0) throw new Error(`PR command failed: ${(r.stderr || r.stdout).trim()}\nCommand: ${cmd}`);
-		s.prUrl = /(https?:\/\/\S+)/.exec(r.stdout)?.[1] ?? r.stdout.trim();
-		this.save();
+		await this.pushBranch();
+		if (!gate.openPr || !cmdTemplate) return;
+		await this.openPr(title, bodyFile, cmdTemplate);
 	}
 }
 
