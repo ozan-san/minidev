@@ -2,20 +2,24 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
 	MAX_ACTIVITY,
+	STAGE_COLORS,
 	agentSummary,
 	budgetLevel,
 	collapseActivity,
+	frameLines,
 	pipelineChips,
 	progressBar,
 	pushActivity,
 	renderDetail,
 	renderWidget,
 	shouldDismissPanel,
+	textWidth,
+	truncateVisible,
 	type ActivityEntry,
 	type DashboardView,
 } from "./ui-model.ts";
 import type { UiDismiss } from "./config.ts";
-import type { RunStatus } from "./state.ts";
+import { STAGES, type RunStatus } from "./state.ts";
 
 type RunState = Parameters<typeof renderWidget>[0]["state"];
 type Theme = Parameters<typeof renderWidget>[1];
@@ -25,6 +29,24 @@ const theme = {
 	fg: (_token: string, text: string) => text,
 	bold: (text: string) => text,
 } as unknown as Theme;
+
+/** Theme stub that records every (token, text) pair so tests can inspect coloring. */
+function recordingTheme(): { theme: Theme; calls: Array<{ token: string; text: string }> } {
+	const calls: Array<{ token: string; text: string }> = [];
+	const rec = {
+		fg: (token: string, text: string) => {
+			calls.push({ token, text });
+			return text;
+		},
+		bold: (text: string) => text,
+	} as unknown as Theme;
+	return { theme: rec, calls };
+}
+
+/** Token used to color the top border drawn by frameLines. */
+function borderToken(calls: Array<{ token: string; text: string }>): string | undefined {
+	return calls.find((c) => c.text.startsWith("╭"))?.token;
+}
 
 function makeState(over: Partial<RunState> = {}): RunState {
 	return {
@@ -201,6 +223,95 @@ describe("shouldDismissPanel", () => {
 	});
 });
 
+describe("STAGE_COLORS", () => {
+	test("covers every stage in order with eight distinct colors", () => {
+		assert.deepEqual(Object.keys(STAGE_COLORS), [...STAGES]);
+		const values = Object.values(STAGE_COLORS);
+		assert.equal(values.length, 8);
+		assert.equal(new Set(values).size, 8);
+	});
+});
+
+describe("textWidth", () => {
+	test("counts the characters of plain text", () => {
+		assert.equal(textWidth(""), 0);
+		assert.equal(textWidth("hello"), 5);
+	});
+
+	test("ignores ANSI SGR escape sequences", () => {
+		assert.equal(textWidth("\u001b[31mab\u001b[0m"), 2);
+		assert.equal(textWidth("\u001b[1;32mabc\u001b[0m"), 3);
+	});
+
+	test("counts wide glyphs and emoji as two cells", () => {
+		assert.equal(textWidth("⏳"), 2);
+		assert.equal(textWidth("中"), 2);
+		assert.equal(textWidth("あ"), 2);
+		assert.equal(textWidth("！"), 2);
+		assert.equal(textWidth("🎉"), 2);
+	});
+
+	test("treats combining marks as zero width", () => {
+		assert.equal(textWidth("e\u0301"), 1);
+	});
+});
+
+describe("truncateVisible", () => {
+	test("returns the input unchanged when it fits", () => {
+		assert.equal(truncateVisible("hello", 5), "hello");
+		assert.equal(truncateVisible("hi", 10), "hi");
+		assert.equal(truncateVisible("\u001b[31mab\u001b[0m", 2), "\u001b[31mab\u001b[0m");
+	});
+
+	test("clips colored text to the max visible cells and stays reset-terminated", () => {
+		const clipped = truncateVisible("\u001b[31mhello\u001b[0m", 3);
+		assert.equal(textWidth(clipped), 3);
+		assert.ok(clipped.endsWith("\u001b[0m"));
+	});
+
+	test("returns an empty string for a non-positive max", () => {
+		assert.equal(truncateVisible("hello", 0), "");
+		assert.equal(truncateVisible("hello", -1), "");
+	});
+});
+
+describe("frameLines", () => {
+	test("draws a top and bottom rail and side rails on every body line", () => {
+		const out = frameLines(["a", "bb"], theme, { color: "border" });
+		assert.ok(out[0].startsWith("╭"));
+		assert.ok(out.at(-1)!.startsWith("╰"));
+		for (const line of out.slice(1, -1)) {
+			assert.ok(line.startsWith("│"));
+			assert.ok(line.endsWith("│"));
+		}
+	});
+
+	test("pads every line to the given width", () => {
+		const out = frameLines(["a", "bb"], theme, { color: "border", width: 20 });
+		for (const line of out) assert.equal(textWidth(line), 20);
+	});
+
+	test("hugs the widest content line when no width is given", () => {
+		const out = frameLines(["a", "bbb"], theme, { color: "border" });
+		// inner = 3, so the whole frame is 3 + 4 cells wide.
+		for (const line of out) assert.equal(textWidth(line), 7);
+	});
+
+	test("clips content wider than width - 4 instead of wrapping", () => {
+		const out = frameLines(["0123456789"], theme, { color: "border", width: 8 });
+		assert.equal(out.length, 3);
+		for (const line of out) assert.equal(textWidth(line), 8);
+		assert.ok(out[1].includes("0123"));
+		assert.ok(!out[1].includes("456789"));
+	});
+
+	test("tints the frame with the requested color", () => {
+		const { theme: rec, calls } = recordingTheme();
+		frameLines(["a"], rec, { color: "warning" });
+		assert.equal(borderToken(calls), "warning");
+	});
+});
+
 describe("progressBar", () => {
 	test("renders filled and empty cells for a fraction", () => {
 		assert.equal(progressBar(0.5, 10), "█████░░░░░");
@@ -239,7 +350,7 @@ describe("renderWidget", () => {
 			makeView({ state: makeState({ status: "running" }), version: "v0.1.0 (abc1234)" }),
 			theme,
 		);
-		const header = out[0];
+		const header = out[1];
 		assert.ok(header.includes("minidev"));
 		assert.ok(header.includes("MD-1"));
 		assert.ok(header.includes("Better UI"));
@@ -248,13 +359,13 @@ describe("renderWidget", () => {
 	});
 
 	test("header omits the version label when unset", () => {
-		const header = renderWidget(makeView({ state: makeState({ status: "running" }) }), theme)[0];
+		const header = renderWidget(makeView({ state: makeState({ status: "running" }) }), theme)[1];
 		assert.ok(!header.includes("v0.1.0"));
 	});
 
 	test("pipeline line contains every stage", () => {
 		const out = renderWidget(makeView(), theme);
-		const pipeline = out[1];
+		const pipeline = out[2];
 		for (const stage of ["workspace", "detect", "scout", "plan", "build", "test", "review", "pr"]) {
 			assert.ok(pipeline.includes(stage), `missing ${stage}`);
 		}
@@ -324,14 +435,60 @@ describe("renderWidget", () => {
 		const out = renderWidget(makeView({ state: makeState({ prUrl: "https://example.com/pr/1" }) }), theme).join("\n");
 		assert.ok(!out.includes("\u001b"));
 	});
+
+	test("wraps the output in a frame bordered by side rails", () => {
+		const out = renderWidget(makeView({ state: makeState({ status: "running" }) }), theme);
+		assert.ok(out[0].startsWith("╭"));
+		assert.ok(out.at(-1)!.startsWith("╰"));
+		for (const line of out.slice(1, -1)) {
+			assert.ok(line.startsWith("│"));
+			assert.ok(line.endsWith("│"));
+		}
+	});
+
+	test("colors the frame with the current stage's palette entry", () => {
+		const state = makeState({ stage: "test" });
+		const { theme: rec, calls } = recordingTheme();
+		renderWidget(makeView({ state }), rec);
+		assert.equal(borderToken(calls), STAGE_COLORS[state.stage]);
+	});
+
+	test("recolors the frame when the stage changes", () => {
+		const first = recordingTheme();
+		const second = recordingTheme();
+		renderWidget(makeView({ state: makeState({ stage: "workspace" }) }), first.theme);
+		renderWidget(makeView({ state: makeState({ stage: "pr" }) }), second.theme);
+		assert.equal(borderToken(first.calls), STAGE_COLORS.workspace);
+		assert.equal(borderToken(second.calls), STAGE_COLORS.pr);
+		assert.notEqual(borderToken(first.calls), borderToken(second.calls));
+	});
+
+	test("keeps every framed line at the terminal width with wide title glyphs and an active chip", () => {
+		const state = makeState({ status: "running", stage: "build", title: "中文字幕 ⏳ テスト 🎉" });
+		const out = renderWidget(makeView({ state, width: 80 }), theme);
+		for (const line of out) assert.equal(textWidth(line), 80, `not 80 cells: ${JSON.stringify(line)}`);
+	});
+
+	test("keeps the header, pipeline, cost and activity content inside the frame", () => {
+		const view = makeView({
+			state: makeState({ status: "running", costUsd: 2.5, budgetUsd: 10 }),
+			activity: [{ kind: "text", text: "working" }],
+			log: [{ kind: "text", text: "working" }],
+		});
+		const out = renderWidget(view, theme).join("\n");
+		assert.ok(out.includes("minidev"));
+		assert.ok(out.includes("workspace") && out.includes("pr"));
+		assert.ok(out.includes("cost"));
+		assert.ok(out.includes("working"));
+	});
 });
 
 describe("renderDetail", () => {
-	test("first line includes the version label", () => {
+	test("header line includes the version label", () => {
 		const out = renderDetail(makeView({ version: "v0.1.0 (abc1234)" }), theme);
-		assert.ok(out[0].includes("minidev"));
-		assert.ok(out[0].includes("v0.1.0 (abc1234)"));
-		assert.ok(out[0].includes("MD-1"));
+		assert.ok(out[1].includes("minidev"));
+		assert.ok(out[1].includes("v0.1.0 (abc1234)"));
+		assert.ok(out[1].includes("MD-1"));
 	});
 
 	test("includes Subtasks, Agents, Checks and Activity sections", () => {
@@ -366,5 +523,28 @@ describe("renderDetail", () => {
 		const out = renderDetail(makeView({ state }), theme);
 		assert.ok(out.length > 0);
 		assert.ok(out.join("\n").includes("needs approval"));
+	});
+
+	test("frames the detail with the current stage color", () => {
+		const state = makeState({ stage: "review" });
+		const { theme: rec, calls } = recordingTheme();
+		const out = renderDetail(makeView({ state }), rec);
+		assert.ok(out[0].startsWith("╭"));
+		assert.ok(out.at(-1)!.startsWith("╰"));
+		assert.equal(borderToken(calls), STAGE_COLORS.review);
+	});
+
+	test("keeps the Subtasks, Agents, Checks, Activity and Artifacts sections", () => {
+		const state = makeState({
+			subtasks: [{ id: "s1", title: "one", goal: "", status: "running", attempts: 2 }],
+			agentRuns: [makeAgentRun()],
+			checks: [{ name: "unit", ok: true, blocking: true, durationMs: 1200 }],
+		});
+		const out = renderDetail(makeView({ state }), theme).join("\n");
+		assert.ok(out.includes("Subtasks"));
+		assert.ok(out.includes("Agents"));
+		assert.ok(out.includes("Checks"));
+		assert.ok(out.includes("Activity"));
+		assert.ok(out.includes("Artifacts"));
 	});
 });

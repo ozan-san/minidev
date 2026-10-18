@@ -57,7 +57,7 @@ class DetailOverlay implements Component {
 	}
 
 	render(width: number): string[] {
-		return renderDetail(this.getView(), this.theme)
+		return renderDetail({ ...this.getView(), width }, this.theme)
 			.map((line) => truncateToWidth(line, width))
 			.slice(this.offset, this.offset + MAX_VISIBLE);
 	}
@@ -257,6 +257,6 @@ export class Dashboard {
 	}
 
 	private render(width: number, th: Theme): string[] {
-		return renderWidget(this.view(), th).map((line) => truncateToWidth(line, width));
+		return renderWidget({ ...this.view(), width }, th).map((line) => truncateToWidth(line, width));
 	}
 }

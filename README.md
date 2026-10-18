@@ -23,8 +23,10 @@ workspace → detect → scout → plan → [approve plan] → build S1..Sn → 
 While a run is active, minidev shows a live widget above the editor plus a status line in the footer with
 the current stage, cost and agent. Press `ctrl+shift+m` to toggle the panel (or use `/minidev ui show`,
 `/minidev ui hide`, `/minidev ui toggle`). `/minidev ui details` opens a scrollable overlay (close with
-`esc`) listing stages, subtasks, agent runs, checks and the full activity log. When a run ends the panel is
-**dismissed** automatically — a successful run clears it, a paused or failed run keeps it so you can resume.
+`esc`) listing stages, subtasks, agent runs, checks and the full activity log. The panel and the details
+overlay are drawn inside a border frame tinted with the color of the stage currently running — each of the
+eight stages has its own color. When a run ends the panel is **dismissed** automatically — a successful run
+clears it, a paused or failed run keeps it so you can resume.
 Set `"ui": { "dismissOn": "never" }` to keep the finished summary on screen, `"terminal"` to dismiss every
 run that ends, or run `/minidev ui dismiss` at any time. `hide` only hides (`/minidev ui show` brings it
 back); `dismiss` removes the panel and its run state.
