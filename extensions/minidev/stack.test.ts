@@ -1,7 +1,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { DEFAULT_CONFIG, type Check, type Config } from "./config.ts";
 import {
+	detectStack,
 	effectiveChecks,
 	effectiveSetup,
 	applyScoutCommands,
@@ -10,6 +14,7 @@ import {
 	type Checks,
 	type StackInfo,
 } from "./stack.ts";
+import { git } from "./util.ts";
 
 function makeStack(over: Partial<StackInfo> = {}): StackInfo {
 	return {
@@ -158,5 +163,26 @@ describe("describeStack", () => {
 		assert.match(text, /no strong signals/);
 		assert.match(text, /Subtask checks \(detected\): none/);
 		assert.match(text, /Final checks: none/);
+	});
+});
+
+describe("detectStack", () => {
+	test("reports a tracked CI workflow as a fact for the generic stack", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "minidev-stack-"));
+		try {
+			await git(dir, ["init"]);
+			fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "x" }));
+			fs.mkdirSync(path.join(dir, ".github", "workflows"), { recursive: true });
+			fs.writeFileSync(path.join(dir, ".github", "workflows", "ci.yml"), "name: CI\n");
+			await git(dir, ["add", "."]);
+
+			const stack = await detectStack(dir, { forced: "generic", derivedData: dir });
+			assert.ok(
+				stack.facts.some((f) => /CI config .*github\/workflows\/ci\.yml/.test(f)),
+				`no CI fact in: ${stack.facts.join(" | ")}`,
+			);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

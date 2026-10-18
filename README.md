@@ -122,6 +122,10 @@ npm test                         # node:test via native TS type-stripping (Node 
 
 Unit tests must only import modules that do not depend on `@earendil-works/*` (not `runner.ts`, `pipeline.ts`, `ui.ts`, `index.ts`, `guard/guard.ts`) and must use `import type` for type-only imports.
 
+### CI
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push and pull request to `main`. The `test` job runs `npm ci` followed by `CI=1 npm run -s test` on Node 22.18, and the `typecheck` job installs pi's peer packages with `npm install --no-save` before running `npm run -s typecheck` with `PI_NODE_MODULES=$PWD/node_modules`. Both jobs use Node 22.18 because the tests rely on native TypeScript type-stripping (Node >= 22.18), so run them with a matching local Node version.
+
 ## Layout
 
 ```
