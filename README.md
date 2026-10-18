@@ -9,7 +9,7 @@ minidev explores the repo first and switches mode for **Android**, **iOS / Swift
 /minidev run ABC-123         # same, key prefilled (Jira source not wired yet)
 /minidev run ./ticket.md     # from a file
 /ticket …                    # alias for /minidev run
-/minidev ui [show|hide|toggle|details]   # show/hide the minidev panel or open the details overlay
+/minidev ui [show|hide|toggle|details|dismiss]   # show/hide/dismiss the minidev panel or open the details overlay
 ```
 
 ## Pipeline
@@ -23,8 +23,11 @@ workspace → detect → scout → plan → [approve plan] → build S1..Sn → 
 While a run is active, minidev shows a live widget above the editor plus a status line in the footer with
 the current stage, cost and agent. Press `ctrl+shift+m` to toggle the panel (or use `/minidev ui show`,
 `/minidev ui hide`, `/minidev ui toggle`). `/minidev ui details` opens a scrollable overlay (close with
-`esc`) listing stages, subtasks, agent runs, checks and the full activity log. The panel stays visible after
-a run ends — until you dismiss it.
+`esc`) listing stages, subtasks, agent runs, checks and the full activity log. When a run ends the panel is
+**dismissed** automatically — a successful run clears it, a paused or failed run keeps it so you can resume.
+Set `"ui": { "dismissOn": "never" }` to keep the finished summary on screen, `"terminal"` to dismiss every
+run that ends, or run `/minidev ui dismiss` at any time. `hide` only hides (`/minidev ui show` brings it
+back); `dismiss` removes the panel and its run state.
 
 ## Modes (stack detection)
 
@@ -70,7 +73,7 @@ switch branches or write outside the worktree. The orchestrator owns git.
 | `/minidev status` | runs for this repo |
 | `/minidev journal [KEY]` | show a run's durable journal (agent submissions, replays, checkpoints) |
 | `/minidev detect` | show the mode, setup and checks minidev would use here |
-| `/minidev ui [show\|hide\|toggle\|details]` | show/hide the live panel or open the details overlay |
+| `/minidev ui [show\|hide\|toggle\|details\|dismiss]` | show, hide, dismiss or inspect the live panel |
 | `/minidev models` | pick model + thinking per role (default or "this run only"); applies from the next call |
 | `/minidev models builder openrouter/deepseek/deepseek-v4.1-flash:high` | non-interactive |
 | `/minidev budget <usd> [KEY\|default]` | raise a run's cap / set default cap |
@@ -104,7 +107,9 @@ task, system prompt or model changed (the input hash differs). Journals written 
 
 `defaults ← ~/.minidev/config.json ← <repo>/.minidev.json` (deep merge). See [`minidev.example.json`](minidev.example.json).
 Model refs are anything `pi --model` accepts (`pi --list-models <search>`). The `durable` block can be set in
-`~/.minidev/config.json` or `<repo>/.minidev.json`.
+`~/.minidev/config.json` or `<repo>/.minidev.json`. The `ui` block controls panel lifetime: `ui.dismissOn`
+is `"done"` by default (dismiss after a successful run), `"terminal"` dismisses after any run that ends,
+`"never"` keeps the panel until `/minidev ui dismiss`.
 
 ## Agent prompts
 
