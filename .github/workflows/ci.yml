@@ -36,5 +36,12 @@ jobs:
           node-version: "22.18"
           cache: npm
       - run: npm ci
+      - name: Install pi peer packages (not saved to lockfile)
+        # .npmrc sets legacy-peer-deps=true, which turns a bare
+        # `npm install --no-save <peer>` into a no-op. Override it so the
+        # pi packages actually get installed for type resolution.
+        run: npm install --no-save --no-package-lock --legacy-peer-deps=false @earendil-works/pi-coding-agent@1 @earendil-works/pi-tui@1
       - name: Typecheck
         run: npm run -s typecheck
+        env:
+          PI_NODE_MODULES: ${{ github.workspace }}/node_modules
