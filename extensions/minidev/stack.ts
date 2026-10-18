@@ -150,30 +150,38 @@ async function has(bin: string): Promise<boolean> {
 	return (await exec("bash", ["-lc", `command -v ${bin}`], { cwd: "/" })).code === 0;
 }
 
-async function iosProfile(s: Scan, derivedData: string, afterSetup = false): Promise<Partial<StackInfo>> {
+/** iOS project generation / dependency-manager setup detected from manifests; returns parallel setup commands, facts and warnings in a fixed order. */
+async function iosSetup(s: Scan): Promise<{ setup: string[]; facts: string[]; warnings: string[] }> {
+	const setup: string[] = [];
 	const facts: string[] = [];
 	const warnings: string[] = [];
-	const setup: string[] = [];
+	if (s.exists("project.yml") && !s.has(/\.xcodeproj\/project\.pbxproj$/)) {
+		setup.push("xcodegen generate");
+		facts.push("XcodeGen (project.yml) — edit project.yml, not the .xcodeproj");
+		if (!(await has("xcodegen"))) warnings.push("xcodegen not installed");
+	}
+	if (s.exists("Project.swift") || s.exists("Tuist")) {
+		setup.push("tuist install && tuist generate --no-open");
+		facts.push("Tuist — edit Project.swift manifests, not the generated .xcodeproj");
+		if (!(await has("tuist"))) warnings.push("tuist not installed");
+	}
+	if (s.exists("Podfile")) {
+		if (!s.has(/^Pods\//)) setup.push("pod install");
+		facts.push("CocoaPods (Podfile) — use the .xcworkspace");
+		if (!(await has("pod"))) warnings.push("CocoaPods (pod) not installed");
+	}
+	return { setup, facts, warnings };
+}
 
+async function iosProfile(s: Scan, derivedData: string, afterSetup = false): Promise<Partial<StackInfo>> {
 	// Project generation / dependency managers (run in setup before scheme detection).
 	// After setup has run, skip this so scheme detection runs on the generated project.
-	if (!afterSetup) {
-		if (s.exists("project.yml") && !s.has(/\.xcodeproj\/project\.pbxproj$/)) {
-			setup.push("xcodegen generate");
-			facts.push("XcodeGen (project.yml) — edit project.yml, not the .xcodeproj");
-			if (!(await has("xcodegen"))) warnings.push("xcodegen not installed");
-		}
-		if (s.exists("Project.swift") || s.exists("Tuist")) {
-			setup.push("tuist install && tuist generate --no-open");
-			facts.push("Tuist — edit Project.swift manifests, not the generated .xcodeproj");
-			if (!(await has("tuist"))) warnings.push("tuist not installed");
-		}
-		if (s.exists("Podfile")) {
-			if (!s.has(/^Pods\//)) setup.push("pod install");
-			facts.push("CocoaPods (Podfile) — use the .xcworkspace");
-			if (!(await has("pod"))) warnings.push("CocoaPods (pod) not installed");
-		}
-	}
+	const info = afterSetup
+		? { setup: [] as string[], facts: [] as string[], warnings: [] as string[] }
+		: await iosSetup(s);
+	const setup = info.setup;
+	const facts = [...info.facts];
+	const warnings = [...info.warnings];
 
 	const xcodeOk = await has("xcodebuild");
 	if (!xcodeOk) warnings.push("xcodebuild not found — iOS builds cannot run on this machine");
