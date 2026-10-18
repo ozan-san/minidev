@@ -7,6 +7,7 @@ import * as ST from "./stack.ts";
 import { loadConfig, type Config, type Role, type RoleModel } from "./config.ts";
 import * as G from "./git.ts";
 import * as P from "./prompts.ts";
+import { appendJournal, inputHash, journalFile, readJournal, replayResult, requestIdFor } from "./durable.ts";
 import { runAgent, type RunAgentResult } from "./runner.ts";
 import { artifact, saveState, STAGES, type PlanJson, type Review, type RunState, type Stage, type Subtask } from "./state.ts";
 import { ticketMarkdown } from "./ticket.ts";
@@ -49,6 +50,7 @@ function guessType(title: string): string {
 export class Pipeline {
 	private cfg: Config;
 	private warned = false;
+	private readonly session = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 	constructor(
 		private s: RunState,
@@ -87,6 +89,31 @@ export class Pipeline {
 		const remaining = this.s.budgetUsd - this.s.costUsd;
 		if (remaining <= 0) throw new Pause("budget");
 		const maxUsd = Math.min(remaining, model.maxUsdPerCall ?? Number.POSITIVE_INFINITY);
+		const item = `${role}:${label}`;
+		const requestId = requestIdFor(this.s.key, role, label);
+		const itemHash = inputHash(def.systemPrompt, task, model.model, model.thinking ?? "");
+		const jfile = journalFile(this.s.runDir);
+
+		if (this.cfg.durable.replay === "safe") {
+			const prior = replayResult(readJournal(jfile), { requestId, inputHash: itemHash, session: this.session });
+			if (prior) {
+				this.d.dash.push(`↻ replayed ${label} from journal`, "info");
+				this.log("info", `↻ replayed ${item} (recorded ${fmtUsd(prior.costUsd ?? 0)})`);
+				return {
+					ok: true,
+					output: prior.output ?? "",
+					costUsd: prior.costUsd ?? 0,
+					turns: prior.turns ?? 0,
+					model: prior.model ?? model.model,
+					stopReason: prior.stopReason,
+					error: prior.error,
+					budgetExceeded: false,
+					aborted: false,
+					transcript: prior.transcript ?? "",
+					replayed: true,
+				} satisfies RunAgentResult;
+			}
+		}
 
 		const startedAt = Date.now();
 		const runIndex = this.s.agentRuns.length + 1;
@@ -106,7 +133,9 @@ export class Pipeline {
 			isolate: this.cfg.subagent.isolate,
 			extraArgs: this.cfg.subagent.extraArgs,
 			onEvent: (e) => {
-				if (e.type === "tool") this.d.dash.push(e.summary, "tool");
+				if (e.type === "started" && e.pid) {
+					appendJournal(jfile, { type: "agent_started", session: this.session, item, requestId, inputHash: itemHash, role, model: model.model, pid: e.pid });
+				} else if (e.type === "tool") this.d.dash.push(e.summary, "tool");
 				else if (e.type === "retry") this.d.dash.push(e.message, "retry");
 				else if (e.type === "text") this.d.dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
 				else if (e.type === "usage") {
@@ -117,6 +146,22 @@ export class Pipeline {
 		});
 		this.d.dash.agentEnd();
 		this.s.costUsd = baseCost + r.costUsd;
+		appendJournal(jfile, {
+			type: "agent_finished",
+			session: this.session,
+			item,
+			requestId,
+			inputHash: itemHash,
+			role,
+			model: r.model,
+			ok: r.ok,
+			costUsd: r.costUsd,
+			turns: r.turns,
+			stopReason: r.stopReason,
+			error: r.error,
+			output: r.output,
+			transcript: r.transcript,
+		});
 		this.s.agentRuns.push({
 			role,
 			label,
@@ -188,6 +233,11 @@ export class Pipeline {
 		s.error = undefined;
 		this.d.dash.attach(s);
 		this.save();
+		appendJournal(journalFile(s.runDir), {
+			type: s.agentRuns.length > 0 || s.completed.length > 0 ? "run_resumed" : "run_started",
+			session: this.session,
+			note: s.status,
+		});
 		try {
 			for (const stage of STAGES) {
 				if (s.completed.includes(stage)) continue;
@@ -198,9 +248,11 @@ export class Pipeline {
 				await this.stages[stage]();
 				s.completed.push(stage);
 				this.save();
+				appendJournal(journalFile(s.runDir), { type: "checkpoint", session: this.session, item: `stage:${stage}` });
 			}
 			s.status = "done";
 			this.save();
+			appendJournal(journalFile(s.runDir), { type: "run_finished", session: this.session, ok: true });
 			const summary = [
 				`Branch: \`${s.branch}\``,
 				`Worktree: \`${s.worktree}\``,
