@@ -1,5 +1,6 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { STAGES, type RunState, type Stage } from "./state.ts";
+import type { UiDismiss } from "./config.ts";
+import { STAGES, type RunState, type RunStatus, type Stage } from "./state.ts";
 import { fmtDuration, fmtUsd } from "./util.ts";
 
 export interface LiveAgent {
@@ -61,6 +62,17 @@ export function budgetLevel(costUsd: number, budgetUsd: number): "ok" | "warn" |
 	if (ratio >= 1) return "over";
 	if (ratio >= 0.8) return "warn";
 	return "ok";
+}
+
+/**
+ * Whether the run panel should be removed when a run ends (config `ui.dismissOn`).
+ * "done": only a successful run. "terminal": any run that is no longer running.
+ * "never": keep the panel until the user dismisses it.
+ */
+export function shouldDismissPanel(status: RunStatus, dismissOn: UiDismiss): boolean {
+	if (dismissOn === "never") return false;
+	if (dismissOn === "done") return status === "done";
+	return status !== "running";
 }
 
 export function progressBar(fraction: number, width: number): string {
