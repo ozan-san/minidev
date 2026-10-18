@@ -117,7 +117,10 @@ Requires OpenRouter credentials in pi (`/login openrouter` or `OPENROUTER_API_KE
 ```bash
 npm ci                           # dev tools only (.npmrc skips peer deps; pi provides them)
 npm run typecheck                # finds your pi install at runtime (or set PI_NODE_MODULES)
+npm test                         # node:test via native TS type-stripping (Node >= 22.18); tests are extensions/**/*.test.ts
 ```
+
+Unit tests must only import modules that do not depend on `@earendil-works/*` (not `runner.ts`, `pipeline.ts`, `ui.ts`, `index.ts`, `guard/guard.ts`) and must use `import type` for type-only imports.
 
 ## Layout
 
