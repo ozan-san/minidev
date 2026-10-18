@@ -22,13 +22,16 @@ const MAX_VISIBLE = 22;
 class DetailOverlay implements Component {
 	private offset = 0;
 	private timer: NodeJS.Timeout;
+	private tui: TUI;
+	private theme: Theme;
+	private getView: () => DashboardView;
+	private done: () => void;
 
-	constructor(
-		private tui: TUI,
-		private theme: Theme,
-		private getView: () => DashboardView,
-		private done: () => void,
-	) {
+	constructor(tui: TUI, theme: Theme, getView: () => DashboardView, done: () => void) {
+		this.tui = tui;
+		this.theme = theme;
+		this.getView = getView;
+		this.done = done;
 		this.timer = setInterval(() => this.tui.requestRender(), 1000);
 		this.timer.unref();
 	}
@@ -72,8 +75,12 @@ export class Dashboard {
 	private timer?: NodeJS.Timeout;
 	private waitingSince?: number;
 	private visible = true;
+	private attached = false;
+	private ctx: ExtensionContext;
 
-	constructor(private ctx: ExtensionContext) {}
+	constructor(ctx: ExtensionContext) {
+		this.ctx = ctx;
+	}
 
 	get isVisible(): boolean {
 		return this.visible;
@@ -81,7 +88,7 @@ export class Dashboard {
 
 	/** True while a run is attached (i.e. the panel can still be shown). */
 	get isAttached(): boolean {
-		return this.state !== undefined;
+		return this.attached;
 	}
 
 	private mount(): void {
@@ -108,6 +115,7 @@ export class Dashboard {
 
 	attach(state: RunState): void {
 		this.state = state;
+		this.attached = true;
 		this.activity = [];
 		this.log = [];
 		this.note = "";
@@ -136,6 +144,7 @@ export class Dashboard {
 
 	/** Remove the widget and status and forget the run — unlike hide(), it cannot be shown again. */
 	dismiss(): void {
+		this.attached = false;
 		this.visible = false;
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
@@ -144,7 +153,7 @@ export class Dashboard {
 		this.log = [];
 		this.note = "";
 		this.waitingSince = undefined;
-		this.state = undefined;
+		// Keep state so an already-open details overlay can finish rendering.
 		this.tui = undefined;
 		if (this.ctx.hasUI) {
 			this.ctx.ui.setWidget(WIDGET, undefined);
@@ -153,20 +162,21 @@ export class Dashboard {
 	}
 
 	show(): void {
-		if (!this.state) return;
+		if (!this.isAttached) return;
 		this.visible = true;
 		this.mount();
 		this.refresh();
 	}
 
 	toggle(): boolean {
+		if (!this.isAttached) return this.visible;
 		if (this.visible) this.hide();
 		else this.show();
 		return this.visible;
 	}
 
 	async openDetails(): Promise<void> {
-		if (!this.state || !this.ctx.hasUI) return;
+		if (!this.isAttached || !this.ctx.hasUI) return;
 		await this.ctx.ui.custom<void>((tui, theme, _kb, done) => new DetailOverlay(tui, theme, () => this.view(), done), {
 			overlay: true,
 			overlayOptions: { anchor: "center", width: "80%", minWidth: 60, maxHeight: 26 },
