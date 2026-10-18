@@ -142,14 +142,22 @@ function deferred<T = void>() {
 
 /** One open pi-durable Harness per run, driven call by call. */
 export class AgentHarness {
-	private constructor(
-		private readonly harness: Harness,
-		private readonly registry: Registry,
-		private readonly registryLike: ModelRegistryLike,
-		private readonly models: Models,
-		private readonly runDir: string,
-		private rootConversation?: Conversation,
-	) {}
+	// Fields are declared explicitly (not as constructor parameter properties): the project runs `node --test` in
+	// strip-only TypeScript mode, which cannot parse parameter properties, so the module must stay loadable there.
+	private readonly harness: Harness;
+	private readonly registry: Registry;
+	private readonly registryLike: ModelRegistryLike;
+	private readonly models: Models;
+	private readonly runDir: string;
+	private rootConversation?: Conversation;
+
+	private constructor(harness: Harness, registry: Registry, registryLike: ModelRegistryLike, models: Models, runDir: string) {
+		this.harness = harness;
+		this.registry = registry;
+		this.registryLike = registryLike;
+		this.models = models;
+		this.runDir = runDir;
+	}
 
 	static async open(o: AgentHarnessOptions): Promise<AgentHarness> {
 		const storage = await openNodeJsonlStorage(sessionDir(o.runDir), BACKGROUND_CONTEXT);
