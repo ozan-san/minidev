@@ -7,8 +7,8 @@ import * as ST from "./stack.ts";
 import { loadConfig, type Config, type Role, type RoleModel } from "./config.ts";
 import * as G from "./git.ts";
 import * as P from "./prompts.ts";
-import { appendJournal, inputHash, readJournal, replayResult, requestIdFor } from "./durable.ts";
-import { runAgent, type RunAgentResult } from "./runner.ts";
+import { agentHarness, type AgentHarness, type RunAgentResult } from "./harness.ts";
+import { inputHash, requestIdFor } from "./harness-util.ts";
 import { artifact, saveState, STAGES, type PlanJson, type Review, type RunState, type Stage, type Subtask } from "./state.ts";
 import { ticketMarkdown } from "./ticket.ts";
 import { shouldDismissPanel } from "./ui-model.ts";
@@ -51,7 +51,7 @@ function guessType(title: string): string {
 export class Pipeline {
 	private cfg: Config;
 	private warned = false;
-	private readonly session = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	private agentRuntime?: Promise<AgentHarness>;
 
 	constructor(
 		private s: RunState,
@@ -80,6 +80,11 @@ export class Pipeline {
 		return this.s.worktree as string;
 	}
 
+	private agentHarness(): Promise<AgentHarness> {
+		this.agentRuntime ??= agentHarness({ runDir: this.s.runDir, registry: this.d.ctx.modelRegistry });
+		return this.agentRuntime;
+	}
+
 	private async agent(role: Role, label: string, task: string): Promise<RunAgentResult> {
 		this.checkStop();
 		this.cfg = loadConfig(this.s.repoRoot); // pick up model/budget changes between calls
@@ -90,52 +95,30 @@ export class Pipeline {
 		const remaining = this.s.budgetUsd - this.s.costUsd;
 		if (remaining <= 0) throw new Pause("budget");
 		const maxUsd = Math.min(remaining, model.maxUsdPerCall ?? Number.POSITIVE_INFINITY);
-		const item = `${role}:${label}`;
 		const requestId = requestIdFor(this.s.key, role, label);
 		const itemHash = inputHash(def.systemPrompt, task, model.model, model.thinking ?? "");
-
-		if (this.cfg.durable.replay === "safe") {
-			const prior = replayResult(await readJournal(this.s.runDir), { requestId, inputHash: itemHash, session: this.session });
-			if (prior) {
-				this.d.dash.push(`↻ replayed ${label} from journal`, "info");
-				this.log("info", `↻ replayed ${item} (recorded ${fmtUsd(prior.costUsd ?? 0)})`);
-				return {
-					ok: true,
-					output: prior.output ?? "",
-					costUsd: prior.costUsd ?? 0,
-					turns: prior.turns ?? 0,
-					model: prior.model ?? model.model,
-					stopReason: prior.stopReason,
-					error: prior.error,
-					budgetExceeded: false,
-					aborted: false,
-					transcript: prior.transcript ?? "",
-					replayed: true,
-				} satisfies RunAgentResult;
-			}
-		}
-
 		const startedAt = Date.now();
 		const runIndex = this.s.agentRuns.length + 1;
 		const fullLabel = `${String(runIndex).padStart(2, "0")}-${label}`;
 		const baseCost = this.s.costUsd;
 		this.d.dash.agentStart({ role, label, model: model.model, costUsd: 0, turns: 0, startedAt });
 
-		const r = await runAgent({
+		const r = await (
+			await this.agentHarness()
+		).run({
 			agent: def,
 			model,
 			task,
 			cwd: this.wt,
 			workDir: path.join(this.s.runDir, "agents"),
 			label: fullLabel,
+			requestId,
+			inputHash: itemHash,
+			replay: this.cfg.durable.replay === "safe",
 			signal: this.d.signal,
 			maxUsd,
-			isolate: this.cfg.subagent.isolate,
-			extraArgs: this.cfg.subagent.extraArgs,
 			onEvent: (e) => {
-				if (e.type === "started" && e.pid) {
-					void appendJournal(this.s.runDir, { type: "agent_started", session: this.session, item, requestId, inputHash: itemHash, role, model: model.model, pid: e.pid });
-				} else if (e.type === "tool") this.d.dash.push(e.summary, "tool");
+				if (e.type === "tool") this.d.dash.push(e.summary, "tool");
 				else if (e.type === "retry") this.d.dash.push(e.message, "retry");
 				else if (e.type === "text") this.d.dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
 				else if (e.type === "usage") {
@@ -145,23 +128,8 @@ export class Pipeline {
 			},
 		});
 		this.d.dash.agentEnd();
-		this.s.costUsd = baseCost + r.costUsd;
-		await appendJournal(this.s.runDir, {
-			type: "agent_finished",
-			session: this.session,
-			item,
-			requestId,
-			inputHash: itemHash,
-			role,
-			model: r.model,
-			ok: r.ok,
-			costUsd: r.costUsd,
-			turns: r.turns,
-			stopReason: r.stopReason,
-			error: r.error,
-			output: r.output,
-			transcript: r.transcript,
-		});
+		// A replayed call's spend was already counted when it first ran.
+		this.s.costUsd = baseCost + (r.replayed ? 0 : r.costUsd);
 		this.s.agentRuns.push({
 			role,
 			label,
@@ -233,11 +201,6 @@ export class Pipeline {
 		s.error = undefined;
 		this.d.dash.attach(s);
 		this.save();
-		await appendJournal(s.runDir, {
-			type: s.agentRuns.length > 0 || s.completed.length > 0 ? "run_resumed" : "run_started",
-			session: this.session,
-			note: s.status,
-		});
 		try {
 			for (const stage of STAGES) {
 				if (s.completed.includes(stage)) continue;
@@ -248,11 +211,9 @@ export class Pipeline {
 				await this.stages[stage]();
 				s.completed.push(stage);
 				this.save();
-				await appendJournal(s.runDir, { type: "checkpoint", session: this.session, item: `stage:${stage}` });
 			}
 			s.status = "done";
 			this.save();
-			await appendJournal(s.runDir, { type: "run_finished", session: this.session, ok: true });
 			const summary = [
 				`Branch: \`${s.branch}\``,
 				`Worktree: \`${s.worktree}\``,
