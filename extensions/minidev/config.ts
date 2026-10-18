@@ -30,6 +30,9 @@ export interface Check {
 
 export type StackSetting = "auto" | "android" | "ios" | "typescript" | "generic";
 
+/** When the run panel is dismissed automatically: after a successful run ("done"), after any run that ends ("terminal"), or never ("never"). */
+export type UiDismiss = "done" | "terminal" | "never";
+
 export interface ChecksConfig {
 	/** Run after every builder subtask. Failures are fed back to the builder. */
 	subtask?: Check[];
@@ -99,6 +102,10 @@ export interface Config {
 		/** Kill subagent processes left over from an interrupted run before resuming. */
 		reapOrphans: boolean;
 	};
+	ui: {
+		/** See UiDismiss. "done" (default) removes the panel when a run succeeds; paused/failed runs keep it so you can resume. */
+		dismissOn: UiDismiss;
+	};
 	limits: {
 		maxSubtasks: number;
 		/** Builder attempts per subtask (incl. retries after failed subtask checks). */
@@ -146,6 +153,7 @@ export const DEFAULT_CONFIG: Config = {
 	pr: { push: true, command: "auto", draft: false },
 	tests: { write: "auto" },
 	durable: { replay: "safe", reapOrphans: true },
+	ui: { dismissOn: "done" },
 	limits: { maxSubtasks: 12, subtaskAttempts: 3, fixRounds: 3, reviewRounds: 1 },
 	subagent: { isolate: true, extraArgs: [] },
 	runsDir: "~/.minidev/runs",

@@ -50,5 +50,6 @@
   "tests": { "write": "auto" },
   "limits": { "maxSubtasks": 12, "subtaskAttempts": 3, "fixRounds": 3, "reviewRounds": 1 },
   "subagent": { "isolate": true, "extraArgs": [] },
-  "durable": { "replay": "safe", "reapOrphans": true }
+  "durable": { "replay": "safe", "reapOrphans": true },
+  "ui": { "dismissOn": "done" }
 }
