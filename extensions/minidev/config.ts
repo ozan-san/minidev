@@ -77,6 +77,7 @@ export interface Config {
 		 * "" = push only. Placeholders (shell-quoted): {title} {bodyFile} {base} {branch} {remote} {draft}
 		 */
 		command: string;
+		/** Open the PR as a draft instead of ready for review. Default: false. */
 		draft: boolean;
 	};
 	/**
@@ -142,7 +143,7 @@ export const DEFAULT_CONFIG: Config = {
 		worktreeRoot: "~/.minidev/worktrees",
 		copyIntoWorktree: ["local.properties", ".env", ".env.local", "Config/Secrets.xcconfig"],
 	},
-	pr: { push: true, command: "auto", draft: true },
+	pr: { push: true, command: "auto", draft: false },
 	tests: { write: "auto" },
 	durable: { replay: "safe", reapOrphans: true },
 	limits: { maxSubtasks: 12, subtaskAttempts: 3, fixRounds: 3, reviewRounds: 1 },

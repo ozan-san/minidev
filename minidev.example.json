@@ -18,7 +18,7 @@
     "worktreeRoot": "~/.minidev/worktrees",
     "copyIntoWorktree": ["local.properties", ".env", ".env.local", "app/google-services.json"]
   },
-  "pr": { "push": true, "command": "auto", "draft": true },
+  "pr": { "push": true, "command": "auto", "draft": false },
 
   "//": "Per-mode defaults — best placed in ~/.minidev/config.json so they apply to all repos of that kind.",
   "stacks": {
