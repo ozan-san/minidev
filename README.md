@@ -52,15 +52,16 @@ The `detect` stage reads tracked files in the fresh worktree, picks a mode, runs
 | detect | orchestrator | – | picks the mode, runs setup, derives checks (see Modes) |
 | scout | `scout` agent (read-only) | DeepSeek v4.1 Flash | → `context.md` + proposed build/test commands (used when none detected) |
 | plan | `planner` agent (read-only) | **Claude Opus 5.5** | → `plan.md` + `plan.json` (small ordered subtasks + test plan) |
-| build | `builder` agent, **one fresh process per subtask** | DeepSeek v4.1 Flash | after each: subtask check; failures fed back (3 tries); commit per subtask |
+| build | `builder` agent, **one fresh conversation per subtask** | DeepSeek v4.1 Flash | after each: subtask check; failures fed back (3 tries); commit per subtask |
 | test | `tester` agent + final checks | DeepSeek v4.1 Flash | writes unit tests if the repo has them; runs final checks; fix loop (3 rounds) |
 | review | `reviewer` agent | Claude Opus 5.5 | JSON verdict; must-fix items → one builder fix round + re-check |
 | pr | orchestrator | – | `git push`, then `gh`/`glab` if detected (configurable), final for review by default (set `pr.draft` to `true` for a draft) |
 
 Pass/fail is decided by **exit codes of your build/test commands**, never by an agent saying "done".
 
-Subagents run as isolated `pi` processes (`--no-extensions` + `guard/guard.ts`): they cannot commit, push,
-switch branches or write outside the worktree. The orchestrator owns git.
+Subagents run **in-process on the [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable)
+Harness**: one conversation per run, reset and reconfigured per agent call. A `beforeTool` guard blocks git mutations
+and writes outside the worktree. The orchestrator owns git.
 
 ## Commands
 
@@ -69,9 +70,9 @@ switch branches or write outside the worktree. The orchestrator owns git.
 | `/minidev run [KEY\|file\|title]` | start a run |
 | `/minidev resume [KEY]` | continue a paused/failed run (from the stage/subtask where it stopped) |
 | `/minidev approve [KEY]` | approve a pending plan/PR gate and continue (useful headless) |
-| `/minidev stop` | stop the active run (kills subagents; resumable) |
+| `/minidev stop` | stop the active run (aborts the running agent call; resumable) |
 | `/minidev status` | runs for this repo |
-| `/minidev journal [KEY]` | show a run's durable journal (agent submissions, replays, checkpoints) |
+| `/minidev journal [KEY]` | show the run's pi-durable agent ledger (calls, replays, attempts) |
 | `/minidev detect` | show the mode, setup and checks minidev would use here |
 | `/minidev ui [show\|hide\|toggle\|details\|dismiss]` | show, hide, dismiss or inspect the live panel |
 | `/minidev models` | pick model + thinking per role (default or "this run only"); applies from the next call |
@@ -89,28 +90,28 @@ the run panel and the `/minidev ui details` header repeat it.
 ## Budget
 
 `budget.maxUsdPerRun` (default $10) is a hard cap over all agents of a run. Cost is tracked from OpenRouter usage on
-every model turn; when the cap is hit the running subagent is killed and the run pauses (`/minidev budget 20` then
+every model turn; when the cap is hit the running agent call is aborted at the next turn boundary and the run pauses (`/minidev budget 20` then
 `/minidev resume`). Overshoot is at most one model turn. Optional per-role cap: `models.<role>.maxUsdPerCall`.
 Warning at `budget.warnAt` (80%).
 
 ## Durability
 
-Every run keeps a durable journal through [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable):
-one JSONL-backed Session per run (`<run dir>/journal/`), where each entry is an atomic append-only commit. A
-half-written entry is never observed, and the journal survives process death.
+Every run keeps a durable, JSONL-backed `Harness`/Session through
+[`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable) under `<run dir>/session/`,
+where each entry is an atomic append-only commit. A half-written entry is never observed, and the session survives
+process death.
 
-Each agent invocation gets a deterministic `requestId` and an input hash; when a run is resumed after a pause or
-crash, a successful recorded call with the same id and hash is **replayed** from the journal instead of
-re-spawned. Leftover subagent processes from an interrupted run are killed before resuming. Two knobs control
-this: `durable.replay` (`"safe"` | `"off"`) and `durable.reapOrphans` (`boolean`). Replay is skipped when the
-task, system prompt or model changed (the input hash differs). Journals written by older minidev versions
-(`journal.jsonl`) are imported once and kept as `journal.jsonl.imported`.
+Each agent call is submitted as a durable submission keyed deterministically by `` `requestId:inputHash` ``. When a
+run is resumed after a pause or crash, a settled successful call with the same key is **replayed** from the session
+instead of re-run, and an in-flight submission is **re-attached** rather than restarted. Replay is skipped when the
+task, system prompt or model changed (the input hash differs). The single knob is `durable.replay` (`"safe"` |
+`"off"`). Nothing is spawned, so the `subagent.isolate`, `subagent.extraArgs` and `durable` block `reapOrphans` settings are gone.
 
 ## Config
 
 `defaults ← ~/.minidev/config.json ← <repo>/.minidev.json` (deep merge). See [`minidev.example.json`](minidev.example.json).
 Model refs are anything `pi --model` accepts (`pi --list-models <search>`). The `durable` block can be set in
-`~/.minidev/config.json` or `<repo>/.minidev.json`. The `ui` block controls panel lifetime: `ui.dismissOn`
+`~/.minidev/config.json` or `<repo>/.minidev.json`; its only knob is `durable.replay` (`"safe"` | `"off"`). The `ui` block controls panel lifetime: `ui.dismissOn`
 is `"done"` by default (dismiss after a successful run), `"terminal"` dismisses after any run that ends,
 `"never"` keeps the panel until `/minidev ui dismiss`.
 
@@ -133,8 +134,8 @@ Keep the output format sections of the role contracts intact; the orchestrator p
 ## Artifacts
 
 `~/.minidev/runs/<repo>/<KEY>/`: `ticket.md`, `context.md`, `plan.md`, `plan.json`, `test-report.md`, `review.md`,
-`pr-body.md`, `state.json`, `journal/` (pi-durable journal: agent submissions, replays, checkpoints),
-`logs/*.log` (check output), `agents/*.jsonl` (full subagent transcripts + prompts).
+`pr-body.md`, `state.json`, `session/` (pi-durable session: conversations, agent calls, replays),
+`logs/*.log` (check output), `agents/*.jsonl` (committed transcript of each agent call, plus `.system.md`/`.task.md` prompts).
 
 ## Install
 
@@ -154,7 +155,7 @@ npm run typecheck                # finds your pi install at runtime (or set PI_N
 npm test                         # node:test via native TS type-stripping (Node >= 22.18); tests are extensions/**/*.test.ts
 ```
 
-Unit tests must only import modules that do not depend on `@earendil-works/*` (not `runner.ts`, `pipeline.ts`, `ui.ts`, `index.ts`, `guard/guard.ts`) and must use `import type` for type-only imports.
+Unit tests must not import `@earendil-works/pi-coding-agent` or `@earendil-works/pi-tui` (which are peer packages, absent locally); `@earendil-works/pi-durable` and `@earendil-works/chord` are ordinary dependencies and are fine. Use `import type` for type-only imports.
 
 ### CI
 
@@ -166,7 +167,12 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on 
 extensions/minidev/
   index.ts      commands, transcript renderer
   pipeline.ts   stage machine (workspace → … → pr), gates, fix loops, budget
-  runner.ts     spawns `pi --mode json` subagents, streams events, enforces cost caps
+  harness.ts    pi-durable Harness: in-process agent runs, replay, recovery
+  harness-models.ts  pi-ai model bridge from the host ModelRegistry
+  harness-util.ts    pure harness helpers (ids, usage, entries, tool selection, context)
+  ledger.ts     pi-durable `minidev.calls` document + call decisions
+  agent-tools.ts     grep/find/ls tools over the harness bash
+  agent-guard.ts     beforeTool hook blocking git mutations and outside-writes
   stack.ts      mode detection (android / ios / typescript / generic), setup, checks
   checks.ts     build/test/lint commands, error extraction
   git.ts        worktree, commit, push
@@ -175,10 +181,8 @@ extensions/minidev/
   ui-model.ts   pure widget/detail renderers + formatting (unit-tested)
   version.ts    package version + short git commit shown in the TUI
   config.ts state.ts ui.ts agents.ts util.ts
-  durable.ts    pi-durable journal: request ids, replay, checkpoints, orphan reaping
 agents/         role contracts (scout, planner, builder, tester, reviewer)
 agents/stacks/  per-mode guidance (android, ios, typescript, generic)
-guard/guard.ts  safety extension loaded into every subagent
 ```
 
 ## Roadmap
@@ -186,4 +190,3 @@ guard/guard.ts  safety extension loaded into every subagent
 - Jira source (Atlassian MCP or REST) → `SOURCES` in `ticket.ts`
 - Parallel builders for independent subtasks (separate worktrees)
 - Emulator/instrumented tests stage
-- Optionally move subagent runs onto the pi-durable task harness itself (in-process conversations instead of `pi -p` subprocesses).

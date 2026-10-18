@@ -9,14 +9,13 @@ const EXAMPLE = fileURLToPath(new URL("../../minidev.example.json", import.meta.
 const README = fileURLToPath(new URL("../../README.md", import.meta.url));
 
 describe("durable config", () => {
-	test("DEFAULT_CONFIG.durable is safe replay with orphan reaping", () => {
-		assert.deepEqual(DEFAULT_CONFIG.durable, { replay: "safe", reapOrphans: true });
+	test("DEFAULT_CONFIG.durable is safe replay", () => {
+		assert.deepEqual(DEFAULT_CONFIG.durable, { replay: "safe" });
 	});
 
-	test("a partial durable override keeps the other default", () => {
+	test("a partial durable override wins", () => {
 		const merged = deepMerge(DEFAULT_CONFIG, { durable: { replay: "off" } });
 		assert.equal(merged.durable.replay, "off");
-		assert.equal(merged.durable.reapOrphans, true);
 	});
 });
 
@@ -48,15 +47,14 @@ describe("pr artifacts", () => {
 
 describe("durability artifacts", () => {
 	test("minidev.example.json parses and documents the durable defaults", () => {
-		const cfg = JSON.parse(fs.readFileSync(EXAMPLE, "utf-8")) as { durable?: { replay?: string; reapOrphans?: boolean } };
+		const cfg = JSON.parse(fs.readFileSync(EXAMPLE, "utf-8")) as { durable?: { replay?: string } };
 		assert.equal(cfg.durable?.replay, "safe");
-		assert.equal(cfg.durable?.reapOrphans, true);
 	});
 
-	test("README documents the journal command and orphan reaping", () => {
+	test("README documents the journal command and replay", () => {
 		const content = fs.readFileSync(README, "utf-8");
 		assert.match(content, /\/minidev journal/);
-		assert.match(content, /durable\.reapOrphans/);
+		assert.match(content, /durable\.replay/);
 	});
 });
 
@@ -68,7 +66,7 @@ describe("ui config", () => {
 	test("a partial ui override wins without touching durable or budget defaults", () => {
 		const merged = deepMerge(DEFAULT_CONFIG, { ui: { dismissOn: "never" } });
 		assert.equal(merged.ui.dismissOn, "never");
-		assert.deepEqual(merged.durable, { replay: "safe", reapOrphans: true });
+		assert.deepEqual(merged.durable, { replay: "safe" });
 		assert.equal(merged.budget.maxUsdPerRun, 10);
 		assert.equal(merged.budget.warnAt, 0.8);
 	});
@@ -86,11 +84,11 @@ describe("dismissal artifacts", () => {
 		assert.match(content, /\/minidev ui dismiss/);
 	});
 
-	test("README still documents final PRs, journal and orphan reaping without draft-by-default", () => {
+	test("README still documents final PRs, journal and replay without draft-by-default", () => {
 		const content = fs.readFileSync(README, "utf-8");
 		assert.doesNotMatch(content, /draft by default/);
 		assert.match(content, /pr\.draft|final by default/);
 		assert.match(content, /\/minidev journal/);
-		assert.match(content, /durable\.reapOrphans/);
+		assert.match(content, /durable\.replay/);
 	});
 });

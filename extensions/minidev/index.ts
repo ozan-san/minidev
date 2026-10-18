@@ -5,7 +5,7 @@
  *   /minidev resume [KEY]                          continue a paused/failed run
  *   /minidev approve [KEY]                         approve a pending plan/PR gate and resume
  *   /minidev status                                list runs for this repo
- *   /minidev journal [KEY]                         show a run's durable journal
+ *   /minidev journal [KEY]                         show the run's pi-durable agent ledger
  *   /minidev stop                                  stop the active run (resumable)
  *   /minidev detect                                show which mode (stack) minidev picks for this repo
  *   /minidev ui [show|hide|toggle|details|dismiss]    show, hide, dismiss or inspect the run panel
@@ -19,7 +19,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Key, Markdown, Text } from "@earendil-works/pi-tui";
 import { loadConfig, PROJECT_CONFIG, ROLES, saveUserConfig, THINKING_LEVELS, USER_CONFIG, type Role, type RoleModel, type Thinking } from "./config.ts";
-import { closeJournals, reapOrphanedAgents, readJournal, summarizeJournal } from "./durable.ts";
+import { closeHarnesses, readLedger, summarizeLedger } from "./harness.ts";
 import { mainRepoRoot } from "./git.ts";
 import { effectiveModel, Pipeline, removeWorktree, type LogEntry } from "./pipeline.ts";
 import { listRuns, loadState, runDirFor, saveState, type RunState } from "./state.ts";
@@ -39,9 +39,6 @@ interface Active {
 const SUBCOMMANDS = ["run", "resume", "approve", "status", "journal", "stop", "detect", "ui", "models", "budget", "clean", "config"];
 
 export default function minidev(pi: ExtensionAPI) {
-	// Never register inside our own subagent processes.
-	if (process.env.MINIDEV_CHILD) return;
-
 	let active: Active | undefined;
 	let dashboard: Dashboard | undefined;
 	let versionLabel: string | undefined;
@@ -73,7 +70,7 @@ export default function minidev(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		active?.controller.abort();
-		void closeJournals();
+		void closeHarnesses();
 	});
 
 	// ── helpers ──────────────────────────────────────────────────────────────
@@ -86,10 +83,6 @@ export default function minidev(pi: ExtensionAPI) {
 
 	/** Starts a run in the background. Headless (pi -p / json) callers await the returned promise. */
 	async function start(state: RunState, ctx: ExtensionContext): Promise<void> {
-		if (loadConfig(state.repoRoot).durable.reapOrphans) {
-			const killed = await reapOrphanedAgents(state.runDir);
-			if (killed.length) ctx.ui.notify(`minidev: killed ${killed.length} leftover subagent process(es) from an interrupted run`, "warning");
-		}
 		const controller = new AbortController();
 		const dash = new Dashboard(ctx, versionLabel);
 		dashboard = dash;
@@ -300,9 +293,9 @@ export default function minidev(pi: ExtensionAPI) {
 		if (!runs.length) return ctx.ui.notify("minidev: no runs for this repo", "info");
 		const lines = await Promise.all(runs.map(async (r) => {
 			const done = r.subtasks.filter((t) => t.status === "done").length;
-			const j = summarizeJournal(await readJournal(r.runDir));
+			const j = summarizeLedger(await readLedger(r.runDir));
 			const interrupted = r.status === "running" && active?.state.key !== r.key;
-			return `${active?.state.key === r.key ? "▶ " : ""}${r.key} · ${r.status}${r.pauseReason ? ` (${r.pauseReason})` : ""} @ ${r.stage} · ${done}/${r.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}/${fmtUsd(r.budgetUsd)}${r.prUrl ? ` · ${r.prUrl}` : ""}${interrupted ? ` · ⚠ interrupted — /minidev resume ${r.key}` : ""} · ${j.entries} journal entries${j.inFlight.length ? ` · ${j.inFlight.length} in flight` : ""}\n   ${r.title}${r.stack ? ` [${r.stack.label}]` : ""}`;
+			return `${active?.state.key === r.key ? "▶ " : ""}${r.key} · ${r.status}${r.pauseReason ? ` (${r.pauseReason})` : ""} @ ${r.stage} · ${done}/${r.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}/${fmtUsd(r.budgetUsd)}${r.prUrl ? ` · ${r.prUrl}` : ""}${interrupted ? ` · ⚠ interrupted — /minidev resume ${r.key}` : ""} · ${j.calls} agent calls (${j.done} done, ${j.failed} failed)${j.running > 0 ? ` · ${j.running} in flight` : ""}\n   ${r.title}${r.stack ? ` [${r.stack.label}]` : ""}`;
 		}));
 		pi.appendEntry<LogEntry>("minidev", { key: path.basename(repoRoot), kind: "info", title: `${runs.length} run(s)`, body: lines.map((l) => `- ${l}`).join("\n") });
 	}
@@ -310,16 +303,16 @@ export default function minidev(pi: ExtensionAPI) {
 	async function cmdJournal(arg: string, ctx: ExtensionCommandContext): Promise<void> {
 		const s = await pickRun(arg, ctx);
 		if (!s) return;
-		const entries = await readJournal(s.runDir);
+		const calls = await readLedger(s.runDir);
 		const body =
-			entries
+			calls
 				.slice(-100)
 				.map(
-					(e) =>
-						`- #${e.seq} ${new Date(e.ts).toISOString()} ${e.type}${e.item ? ` ${e.item}` : ""}${e.type === "agent_finished" ? ` ${e.ok ? "ok" : "failed"} ${fmtUsd(e.costUsd ?? 0)}` : ""}`,
+					(c) =>
+						`- ${new Date(c.at).toISOString()} ${c.requestId} #${c.attempt} ${c.status}${c.ok ? " ok" : " failed"} ${fmtUsd(c.costUsd)}${c.error ? ` — ${c.error.split("\n")[0]}` : ""}`,
 				)
-				.join("\n") || "(no journal entries yet)";
-		pi.appendEntry<LogEntry>("minidev", { key: s.key, kind: "info", title: `journal ${s.key} (${entries.length})`, body });
+				.join("\n") || "(no agent calls yet)";
+		pi.appendEntry<LogEntry>("minidev", { key: s.key, kind: "info", title: `${calls.length} agent calls`, body });
 	}
 
 	async function cmdUi(arg: string, ctx: ExtensionCommandContext): Promise<void> {
