@@ -36,7 +36,7 @@ interface Active {
 	done: Promise<void>;
 }
 
-const SUBCOMMANDS = ["run", "resume", "approve", "status", "journal", "stop", "detect", "ui", "models", "budget", "clean", "config"];
+const SUBCOMMANDS = ["run", "resume", "approve", "status", "journal", "stop", "detect", "ui", "models", "budget", "clean", "config"] as const;
 
 export default function minidev(pi: ExtensionAPI) {
 	let active: Active | undefined;
@@ -285,6 +285,63 @@ export default function minidev(pi: ExtensionAPI) {
 		ctx.ui.notify(`minidev: ${state.key} budget ${fmtUsd(usd)} (spent ${fmtUsd(state.costUsd)})`, "info");
 	}
 
+	async function cmdResume(arg: string, ctx: ExtensionCommandContext): Promise<void> {
+		const s = await pickRun(arg, ctx, (r) => r.status !== "done");
+		if (s) await resume(s, ctx);
+	}
+
+	async function cmdApprove(arg: string, ctx: ExtensionCommandContext): Promise<void> {
+		const s = await pickRun(arg, ctx, (r) => r.status === "paused" && /approval/.test(r.pauseReason ?? ""));
+		if (!s) return;
+		if (/plan/.test(s.pauseReason ?? "")) s.planApproved = true;
+		else if (/PR/.test(s.pauseReason ?? "")) s.prApproved = true;
+		else return ctx.ui.notify(`minidev: ${s.key} is not waiting for approval`, "info");
+		saveState(s);
+		return resume(s, ctx);
+	}
+
+	async function cmdStop(ctx: ExtensionCommandContext): Promise<void> {
+		if (!active) return ctx.ui.notify("minidev: nothing running", "info");
+		ctx.ui.notify(`minidev: stopping ${active.state.key}…`, "info");
+		active.controller.abort();
+		await active.done;
+	}
+
+	async function cmdDetect(ctx: ExtensionCommandContext): Promise<void> {
+		const repoRoot = await repoOrFail(ctx);
+		if (!repoRoot) return;
+		const cfg = loadConfig(repoRoot);
+		const st = await detectStack(repoRoot, { forced: cfg.stack, derivedData: path.join(os.tmpdir(), "minidev-detect-dd") });
+		pi.appendEntry<LogEntry>("minidev", {
+			key: path.basename(repoRoot),
+			kind: "plan",
+			title: `mode: ${st.label}`,
+			body: `${describeStack(st, effectiveChecks(cfg, st))}\n\nAgent guidance: \`agents/stacks/${st.id}.md\`. Override with \`"stack"\` in ${PROJECT_CONFIG}.`,
+		});
+	}
+
+	async function cmdClean(arg: string, ctx: ExtensionCommandContext): Promise<void> {
+		const s = await pickRun(arg, ctx);
+		if (!s) return;
+		if (active?.state.key === s.key) return ctx.ui.notify("minidev: stop the run first", "warning");
+		if (ctx.hasUI && !(await ctx.ui.confirm("Remove worktree?", `${s.worktree}\n(branch ${s.branch} and run artifacts are kept)`))) return;
+		await removeWorktree(s);
+		s.worktree = undefined;
+		s.completed = s.completed.filter((x) => x !== "workspace");
+		saveState(s);
+		return ctx.ui.notify(`minidev: removed worktree for ${s.key}`, "info");
+	}
+
+	async function cmdConfig(ctx: ExtensionCommandContext): Promise<void> {
+		const repoRoot = (await mainRepoRoot(ctx.cwd)) ?? undefined;
+		pi.appendEntry<LogEntry>("minidev", {
+			key: "config",
+			kind: "info",
+			title: `effective config (defaults ← ${USER_CONFIG}${repoRoot ? ` ← ${path.join(repoRoot, PROJECT_CONFIG)}` : ""})`,
+			body: `\`\`\`json\n${JSON.stringify(loadConfig(repoRoot), null, 2)}\n\`\`\``,
+		});
+	}
+
 	async function cmdStatus(ctx: ExtensionCommandContext): Promise<void> {
 		const repoRoot = await repoOrFail(ctx);
 		if (!repoRoot) return;
@@ -345,6 +402,22 @@ export default function minidev(pi: ExtensionAPI) {
 
 	// ── commands ─────────────────────────────────────────────────────────────
 
+	type CommandHandler = (rest: string, ctx: ExtensionCommandContext) => Promise<void>;
+	const COMMANDS: Record<(typeof SUBCOMMANDS)[number], CommandHandler> = {
+		run: cmdRun,
+		resume: cmdResume,
+		approve: cmdApprove,
+		status: (_rest, ctx) => cmdStatus(ctx),
+		journal: cmdJournal,
+		stop: (_rest, ctx) => cmdStop(ctx),
+		detect: (_rest, ctx) => cmdDetect(ctx),
+		ui: cmdUi,
+		models: cmdModels,
+		budget: cmdBudget,
+		clean: cmdClean,
+		config: (_rest, ctx) => cmdConfig(ctx),
+	};
+
 	pi.registerCommand("minidev", {
 		description: "Ticket → PR pipeline: run | resume | approve | status | journal | stop | detect | ui | models | budget | clean | config",
 		getArgumentCompletions: (prefix) => {
@@ -359,77 +432,9 @@ export default function minidev(pi: ExtensionAPI) {
 			const sp = trimmed.indexOf(" ");
 			const sub = (sp < 0 ? trimmed : trimmed.slice(0, sp)) || "run";
 			const rest = sp < 0 ? "" : trimmed.slice(sp + 1).trim();
-			switch (sub) {
-				case "run":
-					return cmdRun(rest, ctx);
-				case "resume": {
-					const s = await pickRun(rest, ctx, (r) => r.status !== "done");
-					if (s) await resume(s, ctx);
-					return;
-				}
-				case "approve": {
-					const s = await pickRun(rest, ctx, (r) => r.status === "paused" && /approval/.test(r.pauseReason ?? ""));
-					if (!s) return;
-					if (/plan/.test(s.pauseReason ?? "")) s.planApproved = true;
-					else if (/PR/.test(s.pauseReason ?? "")) s.prApproved = true;
-					else return ctx.ui.notify(`minidev: ${s.key} is not waiting for approval`, "info");
-					saveState(s);
-					return resume(s, ctx);
-				}
-				case "status":
-					return cmdStatus(ctx);
-				case "journal":
-					return cmdJournal(rest, ctx);
-				case "stop":
-					if (!active) return ctx.ui.notify("minidev: nothing running", "info");
-					ctx.ui.notify(`minidev: stopping ${active.state.key}…`, "info");
-					active.controller.abort();
-					await active.done;
-					return;
-				case "detect": {
-					const repoRoot = await repoOrFail(ctx);
-					if (!repoRoot) return;
-					const cfg = loadConfig(repoRoot);
-					const st = await detectStack(repoRoot, { forced: cfg.stack, derivedData: path.join(os.tmpdir(), "minidev-detect-dd") });
-					pi.appendEntry<LogEntry>("minidev", {
-						key: path.basename(repoRoot),
-						kind: "plan",
-						title: `mode: ${st.label}`,
-						body: `${describeStack(st, effectiveChecks(cfg, st))}\n\nAgent guidance: \`agents/stacks/${st.id}.md\`. Override with \`"stack"\` in ${PROJECT_CONFIG}.`,
-					});
-					return;
-				}
-				case "ui":
-					return cmdUi(rest, ctx);
-				case "models":
-					return cmdModels(rest, ctx);
-				case "budget":
-					return cmdBudget(rest, ctx);
-				case "clean": {
-					const s = await pickRun(rest, ctx);
-					if (!s) return;
-					if (active?.state.key === s.key) return ctx.ui.notify("minidev: stop the run first", "warning");
-					if (ctx.hasUI && !(await ctx.ui.confirm("Remove worktree?", `${s.worktree}\n(branch ${s.branch} and run artifacts are kept)`))) return;
-					await removeWorktree(s);
-					s.worktree = undefined;
-					s.completed = s.completed.filter((x) => x !== "workspace");
-					saveState(s);
-					return ctx.ui.notify(`minidev: removed worktree for ${s.key}`, "info");
-				}
-				case "config": {
-					const repoRoot = (await mainRepoRoot(ctx.cwd)) ?? undefined;
-					pi.appendEntry<LogEntry>("minidev", {
-						key: "config",
-						kind: "info",
-						title: `effective config (defaults ← ${USER_CONFIG}${repoRoot ? ` ← ${path.join(repoRoot, PROJECT_CONFIG)}` : ""})`,
-						body: `\`\`\`json\n${JSON.stringify(loadConfig(repoRoot), null, 2)}\n\`\`\``,
-					});
-					return;
-				}
-				default:
-					// `/minidev ABC-123` or `/minidev some title` → run
-					return cmdRun(trimmed, ctx);
-			}
+			const cmd = Object.hasOwn(COMMANDS, sub) ? COMMANDS[sub as keyof typeof COMMANDS] : undefined;
+			// `/minidev ABC-123` or `/minidev some title` → run
+			return cmd ? cmd(rest, ctx) : cmdRun(trimmed, ctx);
 		},
 	});
 
