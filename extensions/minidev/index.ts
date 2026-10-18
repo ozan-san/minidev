@@ -7,6 +7,7 @@
  *   /minidev status                                list runs for this repo
  *   /minidev stop                                  stop the active run (resumable)
  *   /minidev detect                                show which mode (stack) minidev picks for this repo
+ *   /minidev ui [show|hide|toggle|details]         show, hide or inspect the run panel
  *   /minidev models [role model[:thinking]]        show / change per-role models
  *   /minidev budget <usd> [default]                change the active run's (or default) budget
  *   /minidev clean <KEY>                           remove a run's worktree
@@ -15,7 +16,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Box, Markdown, Text } from "@earendil-works/pi-tui";
+import { Box, Key, Markdown, Text } from "@earendil-works/pi-tui";
 import { loadConfig, PROJECT_CONFIG, ROLES, saveUserConfig, THINKING_LEVELS, USER_CONFIG, type Role, type RoleModel, type Thinking } from "./config.ts";
 import { mainRepoRoot } from "./git.ts";
 import { effectiveModel, Pipeline, removeWorktree, type LogEntry } from "./pipeline.ts";
@@ -32,13 +33,14 @@ interface Active {
 	done: Promise<void>;
 }
 
-const SUBCOMMANDS = ["run", "resume", "approve", "status", "stop", "detect", "models", "budget", "clean", "config"];
+const SUBCOMMANDS = ["run", "resume", "approve", "status", "stop", "detect", "ui", "models", "budget", "clean", "config"];
 
 export default function minidev(pi: ExtensionAPI) {
 	// Never register inside our own subagent processes.
 	if (process.env.MINIDEV_CHILD) return;
 
 	let active: Active | undefined;
+	let dashboard: Dashboard | undefined;
 
 	// ── transcript rendering for pipeline log entries (not sent to the model) ──
 	pi.registerEntryRenderer<LogEntry>("minidev", (entry, { expanded }, theme) => {
@@ -76,6 +78,7 @@ export default function minidev(pi: ExtensionAPI) {
 	function start(state: RunState, ctx: ExtensionContext): Promise<void> {
 		const controller = new AbortController();
 		const dash = new Dashboard(ctx);
+		dashboard = dash;
 		const pipeline = new Pipeline(state, { pi, ctx, dash, signal: controller.signal });
 		const done = pipeline.run().finally(() => {
 			if (active?.state === state) active = undefined;
@@ -287,13 +290,38 @@ export default function minidev(pi: ExtensionAPI) {
 		pi.appendEntry<LogEntry>("minidev", { key: path.basename(repoRoot), kind: "info", title: `${runs.length} run(s)`, body: lines.map((l) => `- ${l}`).join("\n") });
 	}
 
+	async function cmdUi(arg: string, ctx: ExtensionCommandContext): Promise<void> {
+		const dash = dashboard;
+		if (!dash) return ctx.ui.notify("minidev: no panel yet — start a run with /minidev run", "info");
+		const what = (arg.trim() || "toggle").toLowerCase();
+		switch (what) {
+			case "hide":
+				dash.hide();
+				return ctx.ui.notify("minidev: panel hidden — /minidev ui shows it again", "info");
+			case "show":
+				dash.show();
+				return;
+			case "details":
+			case "log":
+				if (!dash.isVisible) dash.show();
+				return dash.openDetails();
+			case "toggle": {
+				const visible = dash.toggle();
+				return ctx.ui.notify(visible ? "minidev: panel shown" : "minidev: panel hidden", "info");
+			}
+			default:
+				return ctx.ui.notify("minidev ui: show | hide | toggle | details", "warning");
+		}
+	}
+
 	// ── commands ─────────────────────────────────────────────────────────────
 
 	pi.registerCommand("minidev", {
-		description: "Ticket → PR pipeline: run | resume | approve | status | stop | detect | models | budget | clean | config",
+		description: "Ticket → PR pipeline: run | resume | approve | status | stop | detect | ui | models | budget | clean | config",
 		getArgumentCompletions: (prefix) => {
 			const parts = prefix.split(/\s+/);
 			if (parts.length <= 1) return SUBCOMMANDS.filter((s) => s.startsWith(parts[0] ?? "")).map((s) => ({ value: s, label: s }));
+			if (parts[0] === "ui" && parts.length === 2) return ["show", "hide", "toggle", "details"].filter((o) => o.startsWith(parts[1] ?? "")).map((o) => ({ value: `ui ${o}`, label: o }));
 			if (parts[0] === "models" && parts.length === 2) return ROLES.filter((r) => r.startsWith(parts[1])).map((r) => ({ value: `models ${r}`, label: r }));
 			return null;
 		},
@@ -340,6 +368,8 @@ export default function minidev(pi: ExtensionAPI) {
 					});
 					return;
 				}
+				case "ui":
+					return cmdUi(rest, ctx);
 				case "models":
 					return cmdModels(rest, ctx);
 				case "budget":
@@ -375,5 +405,12 @@ export default function minidev(pi: ExtensionAPI) {
 	pi.registerCommand("ticket", {
 		description: "minidev: start a ticket → PR run (alias for /minidev run)",
 		handler: (args, ctx) => cmdRun(args, ctx),
+	});
+
+	pi.registerShortcut(Key.ctrlShift("m"), {
+		description: "Toggle minidev panel",
+		handler: () => {
+			dashboard?.toggle();
+		},
 	});
 }
