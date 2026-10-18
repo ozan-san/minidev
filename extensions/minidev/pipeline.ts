@@ -7,7 +7,7 @@ import * as ST from "./stack.ts";
 import { loadConfig, type Config, type Role, type RoleModel } from "./config.ts";
 import * as G from "./git.ts";
 import * as P from "./prompts.ts";
-import { agentHarness, type AgentHarness, type RunAgentResult } from "./harness.ts";
+import { agentHarness, type AgentHarness, type RunnerEvent, type RunAgentResult } from "./harness.ts";
 import { inputHash, requestIdFor } from "./harness-util.ts";
 import { artifact, saveState, STAGES, type PlanJson, type Review, type RunState, type Stage, type Subtask } from "./state.ts";
 import { ticketMarkdown } from "./ticket.ts";
@@ -89,6 +89,45 @@ export class Pipeline {
 		return this.agentRuntime;
 	}
 
+	/** Forward harness events to the dashboard, tracking live cost. */
+	private agentSink(baseCost: number, fallbackModel: string): (e: RunnerEvent) => void {
+		return (e) => {
+			const dash = this.d.dash;
+			if (e.type === "tool") dash.push(e.summary, "tool");
+			else if (e.type === "retry") dash.push(e.message, "retry");
+			else if (e.type === "text") dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
+			else if (e.type === "usage") {
+				this.s.costUsd = baseCost + e.costUsd;
+				dash.agentUpdate({ costUsd: e.costUsd, turns: e.turns, model: e.model ?? fallbackModel });
+			}
+		};
+	}
+
+	/** Account a finished agent call's cost and append it to the run ledger. */
+	private recordAgentRun(role: Role, label: string, startedAt: number, baseCost: number, r: RunAgentResult): void {
+		// A replayed call's spend was already counted when it first ran.
+		this.s.costUsd = baseCost + (r.replayed ? 0 : r.costUsd);
+		this.s.agentRuns.push({
+			role, label, model: r.model, costUsd: r.costUsd, turns: r.turns, ok: r.ok, startedAt, endedAt: Date.now(), transcript: r.transcript,
+		});
+		this.save();
+	}
+
+	/** Notify once when spend crosses the configured warning threshold. */
+	private warnIfOverBudget(): void {
+		const frac = this.s.costUsd / this.s.budgetUsd;
+		if (this.warned || frac < this.cfg.budget.warnAt) return;
+		this.warned = true;
+		this.notify(`Budget ${Math.round(frac * 100)}% used (${fmtUsd(this.s.costUsd)} of ${fmtUsd(this.s.budgetUsd)})`, "warning");
+	}
+
+	/** Map an aborted or over-budget call onto a `Pause`. */
+	private assertAgentRan(r: RunAgentResult, role: Role, maxUsd: number): RunAgentResult {
+		if (r.aborted) throw new Pause("stopped");
+		if (r.budgetExceeded) throw new Pause(this.s.costUsd >= this.s.budgetUsd ? "budget" : `per-call cap for ${role} (${fmtUsd(maxUsd)})`);
+		return r;
+	}
+
 	private async agent(role: Role, label: string, task: string): Promise<RunAgentResult> {
 		this.checkStop();
 		this.cfg = loadConfig(this.s.repoRoot); // pick up model/budget changes between calls
@@ -121,42 +160,12 @@ export class Pipeline {
 			replay: this.cfg.durable.replay === "safe",
 			signal: this.d.signal,
 			maxUsd,
-			onEvent: (e) => {
-				if (e.type === "tool") this.d.dash.push(e.summary, "tool");
-				else if (e.type === "retry") this.d.dash.push(e.message, "retry");
-				else if (e.type === "text") this.d.dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
-				else if (e.type === "usage") {
-					this.s.costUsd = baseCost + e.costUsd;
-					this.d.dash.agentUpdate({ costUsd: e.costUsd, turns: e.turns, model: e.model ?? model.model });
-				}
-			},
+			onEvent: this.agentSink(baseCost, model.model),
 		});
 		this.d.dash.agentEnd();
-		// A replayed call's spend was already counted when it first ran.
-		this.s.costUsd = baseCost + (r.replayed ? 0 : r.costUsd);
-		this.s.agentRuns.push({
-			role,
-			label,
-			model: r.model,
-			costUsd: r.costUsd,
-			turns: r.turns,
-			ok: r.ok,
-			startedAt,
-			endedAt: Date.now(),
-			transcript: r.transcript,
-		});
-		this.save();
-
-		const frac = this.s.costUsd / this.s.budgetUsd;
-		if (!this.warned && frac >= this.cfg.budget.warnAt) {
-			this.warned = true;
-			this.notify(`Budget ${Math.round(frac * 100)}% used (${fmtUsd(this.s.costUsd)} of ${fmtUsd(this.s.budgetUsd)})`, "warning");
-		}
-		if (r.aborted) throw new Pause("stopped");
-		if (r.budgetExceeded) {
-			throw new Pause(this.s.costUsd >= this.s.budgetUsd ? "budget" : `per-call cap for ${role} (${fmtUsd(maxUsd)})`);
-		}
-		return r;
+		this.recordAgentRun(role, label, startedAt, baseCost, r);
+		this.warnIfOverBudget();
+		return this.assertAgentRan(r, role, maxUsd);
 	}
 
 	private notify(msg: string, type: "info" | "warning" | "error" = "info"): void {
