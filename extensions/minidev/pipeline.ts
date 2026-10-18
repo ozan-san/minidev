@@ -106,9 +106,9 @@ export class Pipeline {
 			isolate: this.cfg.subagent.isolate,
 			extraArgs: this.cfg.subagent.extraArgs,
 			onEvent: (e) => {
-				if (e.type === "tool") this.d.dash.push(e.summary);
-				else if (e.type === "retry") this.d.dash.push(`↻ ${e.message}`);
-				else if (e.type === "text") this.d.dash.push(`» ${e.text.split("\n").find((l) => l.trim()) ?? ""}`);
+				if (e.type === "tool") this.d.dash.push(e.summary, "tool");
+				else if (e.type === "retry") this.d.dash.push(e.message, "retry");
+				else if (e.type === "text") this.d.dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
 				else if (e.type === "usage") {
 					this.s.costUsd = baseCost + e.costUsd;
 					this.d.dash.agentUpdate({ costUsd: e.costUsd, turns: e.turns, model: e.model ?? model.model });
@@ -155,7 +155,7 @@ export class Pipeline {
 		const res = await runChecks(list, this.wt, path.join(this.s.runDir, "logs"), label, {
 			hasTests,
 			signal: this.d.signal,
-			onLine: (name, l) => this.d.dash.push(`[${name}] ${l}`),
+			onLine: (name, l) => this.d.dash.push(`[${name}] ${l}`, "check"),
 		});
 		this.checkStop();
 		for (const r of res) {
@@ -167,7 +167,7 @@ export class Pipeline {
 
 	private async commit(message: string): Promise<string | null> {
 		const sha = await G.commitAll(this.wt, message);
-		if (sha) this.d.dash.push(`commit ${sha} ${message}`);
+		if (sha) this.d.dash.push(`commit ${sha} ${message}`, "commit");
 		return sha;
 	}
 
@@ -302,7 +302,7 @@ export class Pipeline {
 			const res = await runChecks([{ name: `${label}${i + 1}`, command: cmd, timeoutSec: 1800 }], this.wt, path.join(this.s.runDir, "logs"), label, {
 				hasTests: false,
 				signal: this.d.signal,
-				onLine: (_n, l) => this.d.dash.push(`[${label}] ${l}`),
+				onLine: (_n, l) => this.d.dash.push(`[${label}] ${l}`, "check"),
 			});
 			this.checkStop();
 			const r = res[0];
