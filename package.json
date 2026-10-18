@@ -9,7 +9,7 @@
     "extensions": ["./extensions/minidev/index.ts"]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "node scripts/typecheck.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

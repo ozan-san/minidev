@@ -7,11 +7,7 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
-    "types": ["node"],
-    "baseUrl": ".",
-    "paths": {
-      "@earendil-works/*": ["~/.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/*"]
-    }
+    "types": ["node"]
   },
   "include": ["extensions/**/*.ts", "guard/**/*.ts"]
 }

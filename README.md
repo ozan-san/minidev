@@ -112,6 +112,13 @@ pi -e ~/minidev
 
 Requires OpenRouter credentials in pi (`/login openrouter` or `OPENROUTER_API_KEY`).
 
+## Development
+
+```bash
+npm install --legacy-peer-deps   # dev tools only; pi's packages come from the host pi
+npm run typecheck                # finds your pi install at runtime (or set PI_NODE_MODULES)
+```
+
 ## Layout
 
 ```
