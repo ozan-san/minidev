@@ -130,3 +130,71 @@ describe("Dashboard widget", () => {
 		dash.dismiss();
 	});
 });
+
+describe("Dashboard lifecycle", () => {
+	function makeCtx() {
+		const setWidget: Array<((tui: TUI, theme: Theme) => Component) | undefined> = [];
+		const setStatus: Array<string | undefined> = [];
+		let widget: Component | undefined;
+		let customCalls = 0;
+		const ctx = {
+			mode: "tui",
+			hasUI: true,
+			ui: {
+				setWidget: (_key: string, factory?: (tui: TUI, theme: Theme) => Component) => {
+					setWidget.push(factory);
+					if (factory) widget = factory(tui, theme);
+				},
+				setStatus: (_key: string, value?: string) => {
+					setStatus.push(value);
+				},
+				custom: async () => {
+					customCalls += 1;
+				},
+			},
+		} as unknown as ExtensionContext;
+		return { ctx, setWidget, setStatus, widget: () => widget, customCalls: () => customCalls };
+	}
+
+	test("hide() then show() re-registers exactly one widget", () => {
+		const h = makeCtx();
+		const dash = new Dashboard(h.ctx);
+		dash.attach(makeState());
+		assert.equal(h.setWidget.length, 1);
+		assert.equal(typeof h.setWidget[0], "function");
+
+		dash.hide();
+		assert.equal(dash.isVisible, false);
+		assert.equal(h.setWidget.at(-1), undefined);
+
+		const before = h.setWidget.length;
+		dash.show();
+		assert.equal(dash.isVisible, true);
+		assert.equal(h.setWidget.length, before + 1);
+		assert.equal(typeof h.setWidget.at(-1), "function");
+		assert.ok(h.widget());
+		dash.dismiss();
+	});
+
+	test("dismiss() clears widget and status and cannot be resurrected", async () => {
+		const h = makeCtx();
+		const dash = new Dashboard(h.ctx);
+		dash.attach(makeState());
+
+		dash.dismiss();
+		assert.equal(dash.isAttached, false);
+		assert.equal(dash.isVisible, false);
+		assert.equal(h.setWidget.at(-1), undefined);
+		assert.deepEqual(h.setStatus, [undefined]);
+
+		const widgets = h.setWidget.length;
+		const statuses = h.setStatus.length;
+		dash.show();
+		assert.equal(h.setWidget.length, widgets);
+		assert.equal(h.setStatus.length, statuses);
+		assert.equal(dash.toggle(), false);
+		assert.equal(h.setWidget.length, widgets);
+		await dash.openDetails();
+		assert.equal(h.customCalls(), 0);
+	});
+});

@@ -547,3 +547,43 @@ describe("renderDetail", () => {
 		assert.ok(out.includes("Artifacts"));
 	});
 });
+
+describe("renderWidget/renderDetail shared rows", () => {
+	const doneState = makeState({ stage: "pr", status: "done", completed: [...STAGES] });
+
+	test("render both views with the same pipeline row", () => {
+		const view = makeView({ state: doneState, width: 140 });
+		const widgetRow = renderWidget(view, theme).find((l) => l.includes("workspace") && l.includes("pr"));
+		const detailRow = renderDetail(view, theme).find((l) => l.includes("workspace") && l.includes("pr"));
+		assert.ok(widgetRow && detailRow);
+		assert.equal(widgetRow, detailRow);
+		for (const stage of STAGES) assert.ok(widgetRow.includes(stage));
+	});
+
+	test("color the cost row by the budget level", () => {
+		const cases: Array<[number, string]> = [
+			[5, "toolOutput"],
+			[8, "warning"],
+			[10, "error"],
+		];
+		for (const [costUsd, token] of cases) {
+			const { theme: rec, calls } = recordingTheme();
+			renderWidget(makeView({ state: makeState({ costUsd, budgetUsd: 10 }) }), rec);
+			const cost = calls.find((c) => c.text.includes("█") || c.text.includes("░"));
+			assert.equal(cost?.token, token, `cost ${costUsd}/10 should be ${token}`);
+		}
+	});
+
+	test("mark a running subtask with brackets in the widget and an icon in the detail", () => {
+		const state = makeState({
+			stage: "build",
+			subtasks: [{ id: "S1", title: "one", goal: "", status: "running", attempts: 1 }],
+		});
+		const widget = renderWidget(makeView({ state }), theme).join("\n");
+		assert.ok(widget.includes("[S1]"));
+		assert.ok(!widget.includes("▶ S1"));
+		const detail = renderDetail(makeView({ state }), theme).join("\n");
+		assert.ok(detail.includes("▶ S1"));
+		assert.ok(!detail.includes("[S1]"));
+	});
+});
