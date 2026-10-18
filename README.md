@@ -52,7 +52,7 @@ The `detect` stage reads tracked files in the fresh worktree, picks a mode, runs
 | build | `builder` agent, **one fresh process per subtask** | DeepSeek v4.1 Flash | after each: subtask check; failures fed back (3 tries); commit per subtask |
 | test | `tester` agent + final checks | DeepSeek v4.1 Flash | writes unit tests if the repo has them; runs final checks; fix loop (3 rounds) |
 | review | `reviewer` agent | Claude Opus 5.5 | JSON verdict; must-fix items → one builder fix round + re-check |
-| pr | orchestrator | – | `git push`, then `gh`/`glab` if detected (configurable), draft by default |
+| pr | orchestrator | – | `git push`, then `gh`/`glab` if detected (configurable), final for review by default (set `pr.draft` to `true` for a draft) |
 
 Pass/fail is decided by **exit codes of your build/test commands**, never by an agent saying "done".
 
