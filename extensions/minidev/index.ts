@@ -19,7 +19,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Key, Markdown, Text } from "@earendil-works/pi-tui";
 import { loadConfig, PROJECT_CONFIG, ROLES, saveUserConfig, THINKING_LEVELS, USER_CONFIG, type Role, type RoleModel, type Thinking } from "./config.ts";
-import { journalFile, reapOrphanedAgents, readJournal, summarizeJournal } from "./durable.ts";
+import { closeJournals, reapOrphanedAgents, readJournal, summarizeJournal } from "./durable.ts";
 import { mainRepoRoot } from "./git.ts";
 import { effectiveModel, Pipeline, removeWorktree, type LogEntry } from "./pipeline.ts";
 import { listRuns, loadState, runDirFor, saveState, type RunState } from "./state.ts";
@@ -66,6 +66,7 @@ export default function minidev(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		active?.controller.abort();
+		void closeJournals();
 	});
 
 	// ── helpers ──────────────────────────────────────────────────────────────
@@ -77,9 +78,9 @@ export default function minidev(pi: ExtensionAPI) {
 	}
 
 	/** Starts a run in the background. Headless (pi -p / json) callers await the returned promise. */
-	function start(state: RunState, ctx: ExtensionContext): Promise<void> {
+	async function start(state: RunState, ctx: ExtensionContext): Promise<void> {
 		if (loadConfig(state.repoRoot).durable.reapOrphans) {
-			const killed = reapOrphanedAgents(state.runDir);
+			const killed = await reapOrphanedAgents(state.runDir);
 			if (killed.length) ctx.ui.notify(`minidev: killed ${killed.length} leftover subagent process(es) from an interrupted run`, "warning");
 		}
 		const controller = new AbortController();
@@ -289,19 +290,19 @@ export default function minidev(pi: ExtensionAPI) {
 		const cfg = loadConfig(repoRoot);
 		const runs = listRuns(cfg.runsDir, path.basename(repoRoot));
 		if (!runs.length) return ctx.ui.notify("minidev: no runs for this repo", "info");
-		const lines = runs.map((r) => {
+		const lines = await Promise.all(runs.map(async (r) => {
 			const done = r.subtasks.filter((t) => t.status === "done").length;
-			const j = summarizeJournal(readJournal(journalFile(r.runDir)));
+			const j = summarizeJournal(await readJournal(r.runDir));
 			const interrupted = r.status === "running" && active?.state.key !== r.key;
 			return `${active?.state.key === r.key ? "▶ " : ""}${r.key} · ${r.status}${r.pauseReason ? ` (${r.pauseReason})` : ""} @ ${r.stage} · ${done}/${r.subtasks.length} subtasks · ${fmtUsd(r.costUsd)}/${fmtUsd(r.budgetUsd)}${r.prUrl ? ` · ${r.prUrl}` : ""}${interrupted ? ` · ⚠ interrupted — /minidev resume ${r.key}` : ""} · ${j.entries} journal entries${j.inFlight.length ? ` · ${j.inFlight.length} in flight` : ""}\n   ${r.title}${r.stack ? ` [${r.stack.label}]` : ""}`;
-		});
+		}));
 		pi.appendEntry<LogEntry>("minidev", { key: path.basename(repoRoot), kind: "info", title: `${runs.length} run(s)`, body: lines.map((l) => `- ${l}`).join("\n") });
 	}
 
 	async function cmdJournal(arg: string, ctx: ExtensionCommandContext): Promise<void> {
 		const s = await pickRun(arg, ctx);
 		if (!s) return;
-		const entries = readJournal(journalFile(s.runDir));
+		const entries = await readJournal(s.runDir);
 		const body =
 			entries
 				.slice(-100)

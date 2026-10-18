@@ -89,13 +89,16 @@ Warning at `budget.warnAt` (80%).
 
 ## Durability
 
-Every run writes an append-only `journal.jsonl` under its run directory. Each agent invocation gets a
-deterministic `requestId` and an input hash; when a run is resumed after a pause or crash, a successful
-recorded call with the same id and hash is **replayed** from the journal instead of re-spawned. Leftover
-subagent processes from an interrupted run are killed before resuming. Two knobs control this: `durable.replay`
-(`"safe"` | `"off"`) and `durable.reapOrphans` (`boolean`). Replay is skipped when the task, system prompt or
-model changed (the input hash differs). This follows the durable-task / exactly-once / replay approach of the
-linked `@earendil-works/pi-durable` post but is implemented natively, with no extra dependency.
+Every run keeps a durable journal through [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable):
+one JSONL-backed Session per run (`<run dir>/journal/`), where each entry is an atomic append-only commit. A
+half-written entry is never observed, and the journal survives process death.
+
+Each agent invocation gets a deterministic `requestId` and an input hash; when a run is resumed after a pause or
+crash, a successful recorded call with the same id and hash is **replayed** from the journal instead of
+re-spawned. Leftover subagent processes from an interrupted run are killed before resuming. Two knobs control
+this: `durable.replay` (`"safe"` | `"off"`) and `durable.reapOrphans` (`boolean`). Replay is skipped when the
+task, system prompt or model changed (the input hash differs). Journals written by older minidev versions
+(`journal.jsonl`) are imported once and kept as `journal.jsonl.imported`.
 
 ## Config
 
@@ -122,7 +125,7 @@ Keep the output format sections of the role contracts intact; the orchestrator p
 ## Artifacts
 
 `~/.minidev/runs/<repo>/<KEY>/`: `ticket.md`, `context.md`, `plan.md`, `plan.json`, `test-report.md`, `review.md`,
-`pr-body.md`, `state.json`, `journal.jsonl` (durable journal: agent submissions, replays, checkpoints),
+`pr-body.md`, `state.json`, `journal/` (pi-durable journal: agent submissions, replays, checkpoints),
 `logs/*.log` (check output), `agents/*.jsonl` (full subagent transcripts + prompts).
 
 ## Install
@@ -163,7 +166,7 @@ extensions/minidev/
   ticket.ts     ticket sources (manual, file; Jira slot)
   ui-model.ts   pure widget/detail renderers + formatting (unit-tested)
   config.ts state.ts ui.ts agents.ts util.ts
-  durable.ts    durable journal: request ids, replay, checkpoints, orphan reaping
+  durable.ts    pi-durable journal: request ids, replay, checkpoints, orphan reaping
 agents/         role contracts (scout, planner, builder, tester, reviewer)
 agents/stacks/  per-mode guidance (android, ios, typescript, generic)
 guard/guard.ts  safety extension loaded into every subagent
@@ -174,4 +177,4 @@ guard/guard.ts  safety extension loaded into every subagent
 - Jira source (Atlassian MCP or REST) → `SOURCES` in `ticket.ts`
 - Parallel builders for independent subtasks (separate worktrees)
 - Emulator/instrumented tests stage
-- Optionally back the journal with the experimental `@earendil-works/pi-durable` harness (tasks/checkpoints/storage adapters).
+- Optionally move subagent runs onto the pi-durable task harness itself (in-process conversations instead of `pi -p` subprocesses).

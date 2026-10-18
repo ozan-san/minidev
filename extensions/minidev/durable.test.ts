@@ -1,13 +1,14 @@
-import { test, describe, after } from "node:test";
+import { test, describe, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
 	appendJournal,
+	closeJournal,
 	inFlightOwners,
 	inputHash,
-	journalFile,
+	journalDir,
 	readJournal,
 	reapOrphanedAgents,
 	replayResult,
@@ -20,15 +21,27 @@ import {
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "minidev-durable-"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
+const opened = new Set<string>();
+function runDir(name: string): string {
+	const dir = path.join(root, name);
+	opened.add(dir);
+	return dir;
+}
+
+afterEach(async () => {
+	await Promise.all([...opened].map((dir) => closeJournal(dir)));
+	opened.clear();
+});
+
 let seq = 0;
 function entry(over: Partial<JournalEntry> & { type: JournalType }): JournalEntry {
 	seq += 1;
 	return { seq, ts: 1000 + seq, ...over };
 }
 
-describe("journalFile", () => {
-	test("joins the run dir with journal.jsonl", () => {
-		assert.equal(journalFile("/runs/repo/K"), path.join("/runs/repo/K", "journal.jsonl"));
+describe("journalDir", () => {
+	test("puts the pi-durable storage under the run dir", () => {
+		assert.equal(journalDir("/runs/repo/K"), path.join("/runs/repo/K", "journal"));
 	});
 });
 
@@ -57,19 +70,54 @@ describe("inputHash", () => {
 });
 
 describe("readJournal", () => {
-	test("returns [] for a missing file", () => {
-		assert.deepEqual(readJournal(path.join(root, "missing", "journal.jsonl")), []);
+	test("returns [] for a run dir that was never written", async () => {
+		assert.deepEqual(await readJournal(runDir("missing")), []);
 	});
 
-	test("returns [] for an unreadable path instead of throwing", () => {
-		assert.deepEqual(readJournal(root), []);
+	test("returns [] for an unreadable path instead of throwing", async () => {
+		const file = path.join(root, "not-a-dir");
+		fs.writeFileSync(file, "x", "utf-8");
+		assert.deepEqual(await readJournal(path.join(file, "nested")), []);
 	});
 
-	test("parses valid JSONL lines and skips malformed lines", () => {
-		const file = path.join(root, "mixed", "journal.jsonl");
-		fs.mkdirSync(path.dirname(file), { recursive: true });
+	test("returns [] for a broken legacy journal instead of throwing", async () => {
+		const dir = runDir("broken-legacy");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "journal.jsonl"), "not json at all\n", "utf-8");
+		assert.deepEqual(await readJournal(dir), []);
+	});
+});
+
+describe("appendJournal / readJournal", () => {
+	test("assigns increasing seq, keeps the injected now as ts and creates nested dirs", async () => {
+		const dir = runDir("nested/a/b");
+		const first = await appendJournal(dir, { type: "run_started", session: "s1" }, 111);
+		const second = await appendJournal(dir, { type: "run_finished", session: "s1", ok: true }, 222);
+		assert.equal(first?.seq, 1);
+		assert.equal(first?.ts, 111);
+		assert.equal(second?.seq, 2);
+		assert.equal(second?.ts, 222);
+		const entries = await readJournal(dir);
+		assert.deepEqual(entries.map((e) => e.seq), [1, 2]);
+		assert.deepEqual(entries.map((e) => e.ts), [111, 222]);
+	});
+
+	test("persists across reopen, like a crash and resume", async () => {
+		const dir = runDir("reopen");
+		await appendJournal(dir, { type: "run_started", session: "s1", note: "kept" });
+		await closeJournal(dir);
+		const entries = await readJournal(dir);
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].note, "kept");
+		await appendJournal(dir, { type: "run_finished", session: "s1", ok: true });
+		assert.deepEqual((await readJournal(dir)).map((e) => e.seq), [1, 2]);
+	});
+
+	test("imports a legacy journal.jsonl once", async () => {
+		const dir = runDir("legacy");
+		fs.mkdirSync(dir, { recursive: true });
 		fs.writeFileSync(
-			file,
+			path.join(dir, "journal.jsonl"),
 			[
 				JSON.stringify({ seq: 1, ts: 1, type: "run_started" }),
 				"not json at all",
@@ -78,25 +126,14 @@ describe("readJournal", () => {
 			].join("\n") + "\n",
 			"utf-8",
 		);
-		const entries = readJournal(file);
+		const entries = await readJournal(dir);
 		assert.equal(entries.length, 2);
 		assert.equal(entries[0].type, "run_started");
 		assert.equal(entries[1].item, "stage:scout");
-	});
-});
-
-describe("appendJournal / readJournal", () => {
-	test("assigns increasing seq, keeps the injected now as ts and creates nested dirs", () => {
-		const file = path.join(root, "nested", "a", "b", "journal.jsonl");
-		const first = appendJournal(file, { type: "run_started", session: "s1" }, 111);
-		const second = appendJournal(file, { type: "run_finished", session: "s1", ok: true }, 222);
-		assert.equal(first.seq, 1);
-		assert.equal(first.ts, 111);
-		assert.equal(second.seq, 2);
-		assert.equal(second.ts, 222);
-		const entries = readJournal(file);
-		assert.deepEqual(entries.map((e) => e.seq), [1, 2]);
-		assert.deepEqual(entries.map((e) => e.ts), [111, 222]);
+		assert.equal(fs.existsSync(path.join(dir, "journal.jsonl")), false);
+		assert.equal(fs.existsSync(path.join(dir, "journal.jsonl.imported")), true);
+		const next = await appendJournal(dir, { type: "run_finished", ok: true });
+		assert.equal(next?.seq, 3);
 	});
 });
 
@@ -206,16 +243,15 @@ describe("summarizeJournal", () => {
 });
 
 describe("reapOrphanedAgents", () => {
-	test("kills only live in-flight pids and returns exactly those pids", () => {
-		const runDir = path.join(root, "reap");
-		const file = journalFile(runDir);
-		appendJournal(file, { type: "agent_started", requestId: "r1", item: "a", pid: 100 });
-		appendJournal(file, { type: "agent_started", requestId: "r2", item: "b", pid: 200 });
-		appendJournal(file, { type: "agent_started", requestId: "r3", item: "c", pid: 300 });
-		appendJournal(file, { type: "agent_finished", requestId: "r3", ok: true });
+	test("kills only live in-flight pids and returns exactly those pids", async () => {
+		const dir = runDir("reap");
+		await appendJournal(dir, { type: "agent_started", requestId: "r1", item: "a", pid: 100 });
+		await appendJournal(dir, { type: "agent_started", requestId: "r2", item: "b", pid: 200 });
+		await appendJournal(dir, { type: "agent_started", requestId: "r3", item: "c", pid: 300 });
+		await appendJournal(dir, { type: "agent_finished", requestId: "r3", ok: true });
 		const alive = new Set([100, 200, 300]);
 		const killed: number[] = [];
-		const result = reapOrphanedAgents(runDir, {
+		const result = await reapOrphanedAgents(dir, {
 			isAlive: (pid) => alive.has(pid),
 			kill: (pid) => killed.push(pid),
 			isOurs: () => true,
@@ -224,12 +260,12 @@ describe("reapOrphanedAgents", () => {
 		assert.deepEqual(killed, [100, 200]);
 	});
 
-	test("does not kill a live pid that belongs to an unrelated process", () => {
-		const runDir = path.join(root, "reap-unrelated");
-		appendJournal(journalFile(runDir), { type: "agent_started", requestId: "r1", pid: 111 });
-		appendJournal(journalFile(runDir), { type: "agent_started", requestId: "r2", pid: 222 });
+	test("does not kill a live pid that belongs to an unrelated process", async () => {
+		const dir = runDir("reap-unrelated");
+		await appendJournal(dir, { type: "agent_started", requestId: "r1", pid: 111 });
+		await appendJournal(dir, { type: "agent_started", requestId: "r2", pid: 222 });
 		const killed: number[] = [];
-		const result = reapOrphanedAgents(runDir, {
+		const result = await reapOrphanedAgents(dir, {
 			isAlive: () => true,
 			kill: (pid) => killed.push(pid),
 			isOurs: (pid) => pid === 222,
@@ -238,11 +274,11 @@ describe("reapOrphanedAgents", () => {
 		assert.deepEqual(killed, [222]);
 	});
 
-	test("does not kill dead pids", () => {
-		const runDir = path.join(root, "reap-dead");
-		appendJournal(journalFile(runDir), { type: "agent_started", requestId: "r1", pid: 555 });
+	test("does not kill dead pids", async () => {
+		const dir = runDir("reap-dead");
+		await appendJournal(dir, { type: "agent_started", requestId: "r1", pid: 555 });
 		const killed: number[] = [];
-		const result = reapOrphanedAgents(runDir, {
+		const result = await reapOrphanedAgents(dir, {
 			isAlive: () => false,
 			kill: (pid) => killed.push(pid),
 		});
@@ -250,16 +286,16 @@ describe("reapOrphanedAgents", () => {
 		assert.deepEqual(killed, []);
 	});
 
-	test("kills nothing when the journal is empty or every started entry has a finish", () => {
-		const emptyDir = path.join(root, "reap-empty");
+	test("kills nothing when the journal is empty or every started entry has a finish", async () => {
+		const emptyDir = runDir("reap-empty");
 		fs.mkdirSync(emptyDir, { recursive: true });
 		const killed: number[] = [];
-		assert.deepEqual(reapOrphanedAgents(emptyDir, { isAlive: () => true, kill: (pid) => killed.push(pid) }), []);
+		assert.deepEqual(await reapOrphanedAgents(emptyDir, { isAlive: () => true, kill: (pid) => killed.push(pid) }), []);
 
-		const doneDir = path.join(root, "reap-done");
-		appendJournal(journalFile(doneDir), { type: "agent_started", requestId: "r1", pid: 777 });
-		appendJournal(journalFile(doneDir), { type: "agent_finished", requestId: "r1", ok: true });
-		assert.deepEqual(reapOrphanedAgents(doneDir, { isAlive: () => true, kill: (pid) => killed.push(pid) }), []);
+		const doneDir = runDir("reap-done");
+		await appendJournal(doneDir, { type: "agent_started", requestId: "r1", pid: 777 });
+		await appendJournal(doneDir, { type: "agent_finished", requestId: "r1", ok: true });
+		assert.deepEqual(await reapOrphanedAgents(doneDir, { isAlive: () => true, kill: (pid) => killed.push(pid) }), []);
 		assert.deepEqual(killed, []);
 	});
 });

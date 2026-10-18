@@ -46,10 +46,12 @@ if (!piModules) {
 
 const cacheDir = join(root, "node_modules", ".cache", "minidev");
 mkdirSync(cacheDir, { recursive: true });
+// Host packages first, then this repo's node_modules: minidev depends on packages pi does not ship (pi-durable, chord).
+const paths = [join(piModules, "@earendil-works", "*"), join(root, "node_modules", "@earendil-works", "*")];
 const tsconfig = join(cacheDir, "tsconfig.typecheck.json");
 writeFileSync(
 	tsconfig,
-	JSON.stringify({ extends: join(root, "tsconfig.json"), compilerOptions: { paths: { "@earendil-works/*": [join(piModules, "@earendil-works", "*")] } } }, null, 2),
+	JSON.stringify({ extends: join(root, "tsconfig.json"), compilerOptions: { paths: { "@earendil-works/*": paths } } }, null, 2),
 );
 
 const tsc = join(root, "node_modules", "typescript", "bin", "tsc");

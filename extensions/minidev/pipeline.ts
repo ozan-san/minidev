@@ -7,7 +7,7 @@ import * as ST from "./stack.ts";
 import { loadConfig, type Config, type Role, type RoleModel } from "./config.ts";
 import * as G from "./git.ts";
 import * as P from "./prompts.ts";
-import { appendJournal, inputHash, journalFile, readJournal, replayResult, requestIdFor } from "./durable.ts";
+import { appendJournal, inputHash, readJournal, replayResult, requestIdFor } from "./durable.ts";
 import { runAgent, type RunAgentResult } from "./runner.ts";
 import { artifact, saveState, STAGES, type PlanJson, type Review, type RunState, type Stage, type Subtask } from "./state.ts";
 import { ticketMarkdown } from "./ticket.ts";
@@ -92,10 +92,9 @@ export class Pipeline {
 		const item = `${role}:${label}`;
 		const requestId = requestIdFor(this.s.key, role, label);
 		const itemHash = inputHash(def.systemPrompt, task, model.model, model.thinking ?? "");
-		const jfile = journalFile(this.s.runDir);
 
 		if (this.cfg.durable.replay === "safe") {
-			const prior = replayResult(readJournal(jfile), { requestId, inputHash: itemHash, session: this.session });
+			const prior = replayResult(await readJournal(this.s.runDir), { requestId, inputHash: itemHash, session: this.session });
 			if (prior) {
 				this.d.dash.push(`↻ replayed ${label} from journal`, "info");
 				this.log("info", `↻ replayed ${item} (recorded ${fmtUsd(prior.costUsd ?? 0)})`);
@@ -134,7 +133,7 @@ export class Pipeline {
 			extraArgs: this.cfg.subagent.extraArgs,
 			onEvent: (e) => {
 				if (e.type === "started" && e.pid) {
-					appendJournal(jfile, { type: "agent_started", session: this.session, item, requestId, inputHash: itemHash, role, model: model.model, pid: e.pid });
+					void appendJournal(this.s.runDir, { type: "agent_started", session: this.session, item, requestId, inputHash: itemHash, role, model: model.model, pid: e.pid });
 				} else if (e.type === "tool") this.d.dash.push(e.summary, "tool");
 				else if (e.type === "retry") this.d.dash.push(e.message, "retry");
 				else if (e.type === "text") this.d.dash.push(e.text.split("\n").find((l) => l.trim()) ?? "", "text");
@@ -146,7 +145,7 @@ export class Pipeline {
 		});
 		this.d.dash.agentEnd();
 		this.s.costUsd = baseCost + r.costUsd;
-		appendJournal(jfile, {
+		await appendJournal(this.s.runDir, {
 			type: "agent_finished",
 			session: this.session,
 			item,
@@ -233,7 +232,7 @@ export class Pipeline {
 		s.error = undefined;
 		this.d.dash.attach(s);
 		this.save();
-		appendJournal(journalFile(s.runDir), {
+		await appendJournal(s.runDir, {
 			type: s.agentRuns.length > 0 || s.completed.length > 0 ? "run_resumed" : "run_started",
 			session: this.session,
 			note: s.status,
@@ -248,11 +247,11 @@ export class Pipeline {
 				await this.stages[stage]();
 				s.completed.push(stage);
 				this.save();
-				appendJournal(journalFile(s.runDir), { type: "checkpoint", session: this.session, item: `stage:${stage}` });
+				await appendJournal(s.runDir, { type: "checkpoint", session: this.session, item: `stage:${stage}` });
 			}
 			s.status = "done";
 			this.save();
-			appendJournal(journalFile(s.runDir), { type: "run_finished", session: this.session, ok: true });
+			await appendJournal(s.runDir, { type: "run_finished", session: this.session, ok: true });
 			const summary = [
 				`Branch: \`${s.branch}\``,
 				`Worktree: \`${s.worktree}\``,
