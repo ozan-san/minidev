@@ -32,6 +32,7 @@ export interface DashboardView {
 	startedStage: number;
 	waitingSince?: number;
 	now: number;
+	version?: string;
 }
 
 export function collapseActivity(text: string): string {
@@ -88,7 +89,7 @@ export function renderWidget(v: DashboardView, th: Theme): string[] {
 		s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
 
 	out.push(
-		`${th.fg("accent", th.bold("minidev"))} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}  ${th.fg(statusColor, s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
+		`${th.fg("accent", th.bold("minidev"))}${v.version ? ` ${th.fg("dim", v.version)}` : ""} ${th.fg("toolTitle", s.key)} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}  ${th.fg(statusColor, s.status)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}`,
 	);
 
 	const pipeline = pipelineChips(s)
@@ -166,7 +167,7 @@ export function renderDetail(v: DashboardView, th: Theme): string[] {
 		s.status === "failed" ? "error" : s.status === "paused" ? "warning" : s.status === "done" ? "success" : "accent";
 
 	out.push(
-		`${th.fg("accent", th.bold(`minidev ${s.key}`))} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}`,
+		`${th.fg("accent", th.bold("minidev"))}${v.version ? ` ${th.fg("dim", v.version)}` : ""} ${th.fg("accent", th.bold(s.key))} ${th.fg("muted", s.title)}${s.stack ? th.fg("dim", ` [${s.stack.label}]`) : ""}`,
 	);
 	out.push(
 		`${th.fg(statusColor, s.status)} ${th.fg("dim", "@")} ${th.fg("toolTitle", s.stage)}${s.pauseReason ? th.fg("warning", ` (${s.pauseReason})`) : ""}${s.error ? th.fg("error", ` — ${s.error.split("\n")[0]}`) : ""}`,

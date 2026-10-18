@@ -26,6 +26,7 @@ import { listRuns, loadState, runDirFor, saveState, type RunState } from "./stat
 import { ISSUE_KEY_RE, parseTicketText, resolveTicket, sanitizeKey, TICKET_TEMPLATE, type Ticket } from "./ticket.ts";
 import { Dashboard } from "./ui.ts";
 import { describeStack, detectStack, effectiveChecks } from "./stack.ts";
+import { loadVersionLabel } from "./version.ts";
 import * as os from "node:os";
 import { fmtUsd } from "./util.ts";
 
@@ -43,6 +44,7 @@ export default function minidev(pi: ExtensionAPI) {
 
 	let active: Active | undefined;
 	let dashboard: Dashboard | undefined;
+	let versionLabel: string | undefined;
 
 	// ── transcript rendering for pipeline log entries (not sent to the model) ──
 	pi.registerEntryRenderer<LogEntry>("minidev", (entry, { expanded }, theme) => {
@@ -62,6 +64,11 @@ export default function minidev(pi: ExtensionAPI) {
 			box.addChild(new Markdown(body, 0, 0, getMarkdownTheme()));
 		}
 		return box;
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		versionLabel = await loadVersionLabel();
+		ctx.ui.setStatus("minidev-version", versionLabel);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -84,7 +91,7 @@ export default function minidev(pi: ExtensionAPI) {
 			if (killed.length) ctx.ui.notify(`minidev: killed ${killed.length} leftover subagent process(es) from an interrupted run`, "warning");
 		}
 		const controller = new AbortController();
-		const dash = new Dashboard(ctx);
+		const dash = new Dashboard(ctx, versionLabel);
 		dashboard = dash;
 		const pipeline = new Pipeline(state, { pi, ctx, dash, signal: controller.signal });
 		const done = pipeline.run().finally(() => {
