@@ -677,6 +677,16 @@ export class Pipeline {
 		const cmdTemplate = await this.resolvePrCommand();
 		this.log("info", `PR ready: ${title}`, `${body}\n\n---\nCommits:\n\`\`\`\n${await G.commitLog(this.wt, s.baseRef as string)}\n\`\`\``);
 
+		// In-place runs never push the base branch itself.
+		if (s.inPlace && !G.pushesInPlace(s.branch as string, s.base as string)) {
+			this.log(
+				"warn",
+				"in-place run on the base branch — nothing pushed",
+				`\`${s.branch}\` is the base branch \`${s.base}\`, so the run kept its commits local (no push, no PR). Work on a feature branch, or run with a worktree, for an automatic PR.`,
+			);
+			return;
+		}
+
 		const gate = await this.prDecision(title, Boolean(cmdTemplate));
 		if (gate.pushOnly) {
 			await this.pushBranch();
