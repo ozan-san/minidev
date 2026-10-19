@@ -229,8 +229,8 @@ export class Pipeline {
 			this.save();
 			const summary = [
 				`Branch: \`${s.branch}\``,
-				`Worktree: \`${s.worktree}\``,
-				s.prUrl ? `PR: ${s.prUrl}` : s.pushed ? "Pushed (no PR command ran)" : "Not pushed",
+				s.inPlace ? `Checkout (in-place): \`${s.worktree}\`` : `Worktree: \`${s.worktree}\``,
+				s.prUrl ? `PR: ${s.prUrl}` : s.pushed ? "Pushed (no PR command ran)" : s.inPlace ? "In-place: commits kept local" : "Not pushed",
 				`Cost: ${fmtUsd(s.costUsd)} (${s.agentRuns.length} agent runs)`,
 				`Artifacts: \`${s.runDir}\``,
 			].join("\n");
@@ -269,28 +269,50 @@ export class Pipeline {
 
 	// ── stages ─────────────────────────────────────────────────────────────
 
+	/**
+	 * Decide where the run works: a fresh worktree on a new branch (default), or in-place
+	 * (`--in-place`/`git.inPlace`) in the main checkout on the current branch, diffed against the
+	 * commit the run started from.
+	 */
 	private async workspace(): Promise<void> {
 		const s = this.s;
 		const g = this.cfg.git;
 		writeFile(artifact(s, "ticket.md"), ticketMarkdown(s.ticket));
-		s.base = s.base ?? (await G.detectBase(s.repoRoot, g.remote, g.baseBranch));
-		if (g.fetch) {
-			this.d.dash.setNote(`git fetch ${g.remote} ${s.base}`);
-			if (!(await G.fetchRemote(s.repoRoot, g.remote, s.base))) this.d.dash.push(`fetch ${g.remote} failed — using local refs`);
+		const inPlace = s.inPlace ?? g.inPlace;
+		const base = s.base ?? (await G.detectBase(s.repoRoot, g.remote, g.baseBranch));
+		if (!inPlace && g.fetch) {
+			this.d.dash.setNote(`git fetch ${g.remote} ${base}`);
+			if (!(await G.fetchRemote(s.repoRoot, g.remote, base))) this.d.dash.push(`fetch ${g.remote} failed — using local refs`);
 		}
-		s.baseRef = s.baseRef ?? (await G.resolveBaseRef(s.repoRoot, g.remote, s.base));
-		s.branch =
-			s.branch ??
-			fill(g.branchTemplate, { key: s.key, slug: slugify(s.title), type: guessType(s.title) }).replace(/[^\w./-]+/g, "-");
-		s.worktree = s.worktree ?? path.join(g.worktreeRoot, s.repoName, s.key);
+		const plan = G.checkoutPlan({
+			inPlace,
+			repoRoot: s.repoRoot,
+			worktreeRoot: g.worktreeRoot,
+			repoName: s.repoName,
+			key: s.key,
+			branch: inPlace ? "" : (s.branch ?? fill(g.branchTemplate, { key: s.key, slug: slugify(s.title), type: guessType(s.title) }).replace(/[^\w./-]+/g, "-")),
+			base,
+			baseRef: inPlace ? "" : (s.baseRef ?? (await G.resolveBaseRef(s.repoRoot, g.remote, base))),
+			currentBranch: inPlace ? ((await G.currentBranch(s.repoRoot)) ?? "") : "",
+			headSha: inPlace ? ((await G.headSha(s.repoRoot)) ?? "") : "",
+		});
+		s.inPlace = inPlace;
+		s.base = plan.base;
+		s.baseRef = plan.baseRef;
+		s.branch = plan.branch;
+		s.worktree = plan.cwd;
+		this.save();
+		if (plan.mode === "in-place") {
+			if (await G.hasChanges(s.repoRoot))
+				throw new Error(`in-place run needs a clean checkout: commit or stash your local changes first (${s.repoRoot})`);
+			const target = G.pushesInPlace(s.branch, s.base) ? `the PR target is \`${s.base}\`` : `\`${s.base}\` is the base branch, so nothing is pushed and no PR is opened`;
+			this.log("info", `in-place on \`${s.branch}\``, `\`${plan.cwd}\` · diff base \`${s.baseRef}\` · ${target}`);
+			return;
+		}
 		const how = await G.ensureWorktree(s.repoRoot, s.worktree, s.branch, s.baseRef);
 		const copied = G.copyIntoWorktree(s.repoRoot, s.worktree, g.copyIntoWorktree);
 		this.save();
-		this.log(
-			"info",
-			`worktree ${how}`,
-			`\`${s.worktree}\` on \`${s.branch}\` from \`${s.baseRef}\`${copied.length ? `\nCopied: ${copied.join(", ")}` : ""}`,
-		);
+		this.log("info", `worktree ${how}`, `\`${s.worktree}\` on \`${s.branch}\` from \`${s.baseRef}\`${copied.length ? `\nCopied: ${copied.join(", ")}` : ""}`);
 	}
 
 	/** Explore the repo, pick the stack mode, run setup (dependency install / project generation). */
