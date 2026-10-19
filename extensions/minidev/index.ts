@@ -336,6 +336,7 @@ export default function minidev(pi: ExtensionAPI) {
 		const s = await pickRun(arg, ctx);
 		if (!s) return;
 		if (active?.state.key === s.key) return ctx.ui.notify("minidev: stop the run first", "warning");
+		if (s.inPlace) return ctx.ui.notify(`minidev: ${s.key} ran in-place — nothing to remove (commits stay on ${s.branch})`, "info");
 		if (ctx.hasUI && !(await ctx.ui.confirm("Remove worktree?", `${s.worktree}\n(branch ${s.branch} and run artifacts are kept)`))) return;
 		await removeWorktree(s);
 		s.worktree = undefined;

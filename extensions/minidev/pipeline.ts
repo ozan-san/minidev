@@ -699,7 +699,9 @@ export class Pipeline {
 	}
 }
 
+/** Remove a run's worktree. No-op for in-place runs — they work in the main checkout. */
 export function removeWorktree(state: RunState): Promise<unknown> {
+	if (state.inPlace) return Promise.resolve();
 	if (!state.worktree || !fs.existsSync(state.worktree)) return Promise.resolve();
 	return exec("git", ["worktree", "remove", "--force", state.worktree], { cwd: state.repoRoot });
 }
