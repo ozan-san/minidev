@@ -45,6 +45,30 @@ describe("pr artifacts", () => {
 	});
 });
 
+describe("git in-place config", () => {
+	test("DEFAULT_CONFIG works in a fresh worktree by default", () => {
+		assert.equal(DEFAULT_CONFIG.git.inPlace, false);
+	});
+
+	test("an inPlace override wins while other git defaults are kept", () => {
+		const merged = deepMerge(DEFAULT_CONFIG, { git: { inPlace: true } });
+		assert.equal(merged.git.inPlace, true);
+		assert.equal(merged.git.baseBranch, "");
+		assert.equal(merged.git.worktreeRoot, DEFAULT_CONFIG.git.worktreeRoot);
+	});
+
+	test("minidev.example.json parses and documents the in-place default", () => {
+		const cfg = JSON.parse(fs.readFileSync(EXAMPLE, "utf-8")) as { git?: { inPlace?: boolean } };
+		assert.equal(cfg.git?.inPlace, false);
+	});
+
+	test("README documents git.inPlace and the --in-place flag", () => {
+		const content = fs.readFileSync(README, "utf-8");
+		assert.match(content, /git\.inPlace/);
+		assert.match(content, /--in-place/);
+	});
+});
+
 describe("durability artifacts", () => {
 	test("minidev.example.json parses and documents the durable defaults", () => {
 		const cfg = JSON.parse(fs.readFileSync(EXAMPLE, "utf-8")) as { durable?: { replay?: string } };
