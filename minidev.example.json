@@ -16,7 +16,8 @@
     "subtaskCommitTemplate": "{key}: {title}",
     "commitPerSubtask": true,
     "worktreeRoot": "~/.minidev/worktrees",
-    "copyIntoWorktree": ["local.properties", ".env", ".env.local", "app/google-services.json"]
+    "copyIntoWorktree": ["local.properties", ".env", ".env.local", "app/google-services.json"],
+    "inPlace": false
   },
   "pr": { "push": true, "command": "auto", "draft": false },
 

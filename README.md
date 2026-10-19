@@ -50,7 +50,7 @@ The `detect` stage reads tracked files in the fresh worktree, picks a mode, runs
 
 | Stage | Who | Default model | Notes |
 |---|---|---|---|
-| workspace | orchestrator | – | `git fetch`, worktree at `~/.minidev/worktrees/<repo>/<KEY>` on `{type}/{key}-{slug}`, copies `local.properties`, `.env*` |
+| workspace | orchestrator | – | `git fetch`, worktree at `~/.minidev/worktrees/<repo>/<KEY>` on `{type}/{key}-{slug}`, copies `local.properties`, `.env*`; `--in-place` runs work in the main checkout on the current branch instead |
 | detect | orchestrator | – | picks the mode, runs setup, derives checks (see Modes) |
 | scout | `scout` agent (read-only) | DeepSeek v4.1 Flash | → `context.md` + proposed build/test commands (used when none detected) |
 | plan | `planner` agent (read-only) | **Claude Opus 5.5** | → `plan.md` + `plan.json` (small ordered subtasks + test plan) |
@@ -69,7 +69,7 @@ and writes outside the worktree. The orchestrator owns git.
 
 | | |
 |---|---|
-| `/minidev run [KEY\|file\|title]` | start a run |
+| `/minidev run [--branch <base>] [--in-place\|--worktree] [KEY\|file\|title]` | start a run |
 | `/minidev resume [KEY]` | continue a paused/failed run (from the stage/subtask where it stopped) |
 | `/minidev approve [KEY]` | approve a pending plan/PR gate and continue (useful headless) |
 | `/minidev stop` | stop the active run (aborts the running agent call; resumable) |
@@ -80,8 +80,20 @@ and writes outside the worktree. The orchestrator owns git.
 | `/minidev models` | pick model + thinking per role (default or "this run only"); applies from the next call |
 | `/minidev models builder openrouter/deepseek/deepseek-v4.1-flash:high` | non-interactive |
 | `/minidev budget <usd> [KEY\|default]` | raise a run's cap / set default cap |
-| `/minidev clean [KEY]` | remove a run's worktree (branch + artifacts kept) |
+| `/minidev clean [KEY]` | remove a run's worktree (branch + artifacts kept; no-op for in-place runs) |
 | `/minidev config` | show effective config |
+
+### Where a run works
+
+By default a run creates a worktree at `~/.minidev/worktrees/<repo>/<KEY>` on `{type}/{key}-{slug}`, cut from
+`git.baseBranch` (or the branch named by the per-run `--branch <base>` / `--base <name>` flag). That same base
+drives `git diff <baseRef>...HEAD`, the commit log and the PR target, and is stored in `state.json` so `resume`
+keeps it.
+
+Pass `--in-place` (or set `"git": { "inPlace": true }`; a per-run `--worktree` overrides it) to work in the main
+checkout on the current branch with no new branch. In-place runs need a clean checkout and run stack setup commands
+in your checkout; they diff against the commit the run started from and only push/open a PR when that branch is not
+the base branch — otherwise they keep commits local. `/minidev clean` does nothing for those runs.
 
 Headless: `pi -p "/minidev run ticket.md"` runs to the first gate and exits; `pi -p "/minidev approve KEY"` continues.
 Set `gates.plan/pr = false` for fully unattended runs.
@@ -115,7 +127,9 @@ task, system prompt or model changed (the input hash differs). The single knob i
 Model refs are anything `pi --model` accepts (`pi --list-models <search>`). The `durable` block can be set in
 `~/.minidev/config.json` or `<repo>/.minidev.json`; its only knob is `durable.replay` (`"safe"` | `"off"`). The `ui` block controls panel lifetime: `ui.dismissOn`
 is `"done"` by default (dismiss after a successful run), `"terminal"` dismisses after any run that ends,
-`"never"` keeps the panel until `/minidev ui dismiss`.
+`"never"` keeps the panel until `/minidev ui dismiss`. The `git` block controls where a run works: `remote`,
+`baseBranch`, `worktreeRoot` and `copyIntoWorktree` shape the default worktree; `git.inPlace` defaults to
+`false`; set it in `<repo>/.minidev.json` to work in the main checkout by default.
 
 ## Agent prompts
 

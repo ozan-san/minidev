@@ -39,6 +39,69 @@ export async function resolveBaseRef(repo: string, remote: string, base: string)
 	throw new Error(`Base branch "${base}" not found locally or on ${remote}. Set git.baseBranch in .minidev.json.`);
 }
 
+// ── checkout planning ──
+
+/** Everything the run knows about the repository before it decides where to work. */
+export interface CheckoutInput {
+	inPlace: boolean;
+	repoRoot: string;
+	worktreeRoot: string;
+	repoName: string;
+	key: string;
+	/** Feature branch to create/use (worktree mode only). */
+	branch: string;
+	/** Base branch name, e.g. "main" (per-run --branch/--base, else git.baseBranch, else detected). */
+	base: string;
+	/** Ref for `base` ("origin/main" or "main"); worktree mode only. */
+	baseRef: string;
+	/** Branch checked out in the main checkout; "" when detached. In-place only. */
+	currentBranch: string;
+	/** HEAD sha of the main checkout. In-place only. */
+	headSha: string;
+}
+
+/** Where a run works and which branch/ref it uses. Pure decision, no I/O. */
+export interface CheckoutPlan {
+	mode: "worktree" | "in-place";
+	/** Directory every agent, check and commit runs in. */
+	cwd: string;
+	/** Branch the run commits to and (when it differs from `base`) pushes. */
+	branch: string;
+	/** Base branch name used as the PR target. */
+	base: string;
+	/** Ref the run's work is diffed against. */
+	baseRef: string;
+}
+
+/** Decide worktree vs in-place and the branch/ref the run uses. Throws when in-place cannot be honoured. */
+export function checkoutPlan(o: CheckoutInput): CheckoutPlan {
+	if (!o.inPlace) {
+		return { mode: "worktree", cwd: path.join(o.worktreeRoot, o.repoName, o.key), branch: o.branch, base: o.base, baseRef: o.baseRef };
+	}
+	if (!o.currentBranch) throw new Error("in-place runs need a checked-out branch: run `git switch <branch>` (or use --worktree) first");
+	if (!o.headSha) throw new Error(`in-place run: could not resolve HEAD in ${o.repoRoot}`);
+	return { mode: "in-place", cwd: o.repoRoot, branch: o.currentBranch, base: o.base, baseRef: o.headSha };
+}
+
+/** Local branch of a checkout; null when HEAD is detached. */
+export async function currentBranch(repo: string): Promise<string | null> {
+	const b = await gitTry(repo, ["branch", "--show-current"]);
+	return b || null;
+}
+
+/** Full sha of HEAD. */
+export async function headSha(repo: string): Promise<string | null> {
+	return gitTry(repo, ["rev-parse", "HEAD"]);
+}
+
+/**
+ * In-place runs push (and open a PR) only off a base branch — never straight onto one. `defaultBase` is the
+ * repository's own default branch, which must not be pushed even when the run's PR target differs from it.
+ */
+export function pushesInPlace(branch: string, base: string, defaultBase?: string): boolean {
+	return branch !== base && branch !== defaultBase;
+}
+
 export async function ensureWorktree(repo: string, wt: string, branch: string, baseRef: string): Promise<"created" | "reused"> {
 	if (fs.existsSync(path.join(wt, ".git"))) {
 		const current = await gitTry(wt, ["branch", "--show-current"]);

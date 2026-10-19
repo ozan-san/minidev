@@ -25,6 +25,12 @@ const finalCheckCmds = (s: RunState, cfg: Config) => cmds(effectiveChecks(cfg, s
 
 const stackLine = (s: RunState) => (s.stack ? `Project mode: ${s.stack.label}\n` : "");
 
+/** "Working directory …" line for the code-writing stages; in-place runs edit the user's own checkout. */
+const cwdLine = (s: RunState) =>
+	s.inPlace
+		? `Working directory (in-place run: the main checkout on branch ${s.branch} — change only what the task needs, everything else in this checkout is the user's): ${s.worktree}`
+		: `Working directory (git worktree): ${s.worktree}`;
+
 export function scoutTask(s: RunState, cfg: Config): string {
 	const f = files(s);
 	const checks = effectiveChecks(cfg, s.stack);
@@ -94,7 +100,7 @@ export function builderSubtaskTask(
 	const done = s.subtasks.filter((x) => x.status === "done");
 	const later = s.subtasks.filter((x) => x.status !== "done" && x.id !== t.id);
 	return `Implement ONE subtask of the plan for ticket ${s.key}: "${s.title}".
-Working directory (git worktree): ${s.worktree}
+${cwdLine(s)}
 ${stackLine(s)}
 Overall goal: ${plan.summary}
 Full plan (read only if you need more context): ${f.plan}
@@ -105,7 +111,7 @@ ${done.length ? `Already done (do not redo):\n${done.map((x) => `- ${x.id}: ${x.
 ${subtaskBlock(t)}
 
 After you finish, the orchestrator runs ${subtaskCheckCmds(s, cfg)}; it must pass.
-${partialWork ? "\nNote: the worktree may contain partial uncommitted work from an interrupted attempt at this subtask — check `git status`/`git diff` and continue from it.\n" : ""}${
+${partialWork ? `\nNote: ${s.inPlace ? "the checkout" : "the worktree"} may contain partial uncommitted work from an interrupted attempt at this subtask — check \`git status\`/\`git diff\` and continue from it.\n` : ""}${
 		previousFailure
 			? `
 ## Previous attempt failed
@@ -120,7 +126,7 @@ ${previousFailure}
 export function fixTask(s: RunState, cfg: Config, problems: string, kind: "checks" | "review"): string {
 	const f = files(s);
 	return `Fix ${kind === "checks" ? "failing checks" : "code review findings"} on the branch for ticket ${s.key}: "${s.title}".
-Working directory (git worktree): ${s.worktree}
+${cwdLine(s)}
 Ticket: ${f.ticket}
 Plan: ${f.plan}
 See what the branch changed with: git diff ${s.baseRef}...HEAD (plus uncommitted changes via git diff)
@@ -137,7 +143,7 @@ export function testerTask(s: RunState, cfg: Config, hasTests: boolean): string 
 	const allowDeps = cfg.tests.write === "always" && !hasTests;
 	const testCmd = effectiveChecks(cfg, s.stack).final.find((c) => /test/i.test(c.name));
 	return `Write unit tests for the change on this branch (ticket ${s.key}: "${s.title}").
-Working directory (git worktree): ${s.worktree}
+${cwdLine(s)}
 ${stackLine(s)}${testCmd ? `Full test command (the orchestrator runs it afterwards): \`${testCmd.command}\`\n` : ""}Base: ${s.baseRef} — see changes with: git diff ${s.baseRef}...HEAD
 Ticket: ${f.ticket}
 Plan: ${f.plan}
@@ -151,7 +157,7 @@ ${hasTests ? "The repo already has unit tests; follow their setup and style." : 
 export function reviewerTask(s: RunState): string {
 	const f = files(s);
 	return `Review the branch for ticket ${s.key}: "${s.title}".
-Working directory (git worktree): ${s.worktree}
+${cwdLine(s)}
 ${stackLine(s)}Diff: git diff ${s.baseRef}...HEAD
 Ticket: ${f.ticket}
 Plan: ${f.plan}

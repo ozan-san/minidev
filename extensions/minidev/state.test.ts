@@ -53,6 +53,24 @@ describe("saveState / loadState", () => {
 	test("returns undefined for a missing run dir", () => {
 		assert.equal(loadState(path.join(root, "does-not-exist")), undefined);
 	});
+
+	test("round-trips the inPlace flag", () => {
+		const runDir = path.join(root, "in-place");
+		saveState(makeState(runDir, { key: "MD-10", inPlace: true }));
+		const loaded = loadState(runDir);
+		assert.ok(loaded);
+		assert.equal(loaded.inPlace, true);
+	});
+
+	test("loads a state file without inPlace as undefined", () => {
+		const runDir = path.join(root, "legacy");
+		const state = makeState(runDir, { key: "MD-11" });
+		delete state.inPlace;
+		saveState(state);
+		const loaded = loadState(runDir);
+		assert.ok(loaded);
+		assert.equal(loaded.inPlace, undefined);
+	});
 });
 
 describe("listRuns", () => {

@@ -69,10 +69,15 @@ export interface RunState {
 	repoRoot: string;
 	repoName: string;
 	runDir: string;
+	/** Work in the main checkout on the current branch: no worktree, no new branch (set by --in-place / git.inPlace). */
+	inPlace?: boolean;
+	/** Linked worktree; for in-place runs this is the main checkout (== repoRoot). */
 	worktree?: string;
 	branch?: string;
 	/** Base branch name, e.g. "main". */
 	base?: string;
+	/** The repository's own default/base branch, resolved for in-place runs (never pushed). */
+	inPlaceBase?: string;
 	/** Ref the branch was cut from / diffed against, e.g. "origin/main". */
 	baseRef?: string;
 	/** Detected project mode (set in the detect stage). */
