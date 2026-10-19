@@ -72,6 +72,8 @@ export interface Config {
 		worktreeRoot: string;
 		/** Untracked files copied from the main checkout into the worktree (e.g. Android local.properties). */
 		copyIntoWorktree: string[];
+		/** Work in the main checkout (no worktree, no new branch) instead of a fresh worktree. A run can override this with --in-place/--worktree. */
+		inPlace: boolean;
 	};
 	pr: {
 		push: boolean;
@@ -138,6 +140,7 @@ export const DEFAULT_CONFIG: Config = {
 		commitPerSubtask: true,
 		worktreeRoot: "~/.minidev/worktrees",
 		copyIntoWorktree: ["local.properties", ".env", ".env.local", "Config/Secrets.xcconfig"],
+		inPlace: false,
 	},
 	pr: { push: true, command: "auto", draft: false },
 	tests: { write: "auto" },
