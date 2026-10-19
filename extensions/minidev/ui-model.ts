@@ -272,7 +272,7 @@ export function renderDetail(v: DashboardView, th: Theme): string[] {
 	}
 
 	out.push("", `${th.fg("muted", "Artifacts")}`);
-	if (s.worktree) out.push(`  ${th.fg("dim", s.worktree)}`);
+	if (s.worktree) out.push(`  ${th.fg("dim", `${s.worktree}${s.inPlace ? " (in-place)" : ""}`)}`);
 	if (s.runDir) out.push(`  ${th.fg("dim", s.runDir)}`);
 	if (s.prUrl) out.push(`  ${th.fg("dim", s.prUrl)}`);
 
