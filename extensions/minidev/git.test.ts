@@ -65,4 +65,9 @@ describe("pushesInPlace", () => {
 	test("a local base name differing from the remote-tracking ref still pushes", () => {
 		assert.equal(pushesInPlace("main", "origin/main"), true);
 	});
+
+	test("the repository's default branch is never pushed even when the PR target differs", () => {
+		assert.equal(pushesInPlace("main", "develop", "main"), false);
+		assert.equal(pushesInPlace("master", "develop", "main"), true);
+	});
 });

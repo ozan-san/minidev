@@ -301,11 +301,14 @@ export class Pipeline {
 		s.baseRef = plan.baseRef;
 		s.branch = plan.branch;
 		s.worktree = plan.cwd;
+		if (plan.mode === "in-place") s.inPlaceBase = await G.detectBase(s.repoRoot, g.remote, "");
 		this.save();
 		if (plan.mode === "in-place") {
 			if (await G.hasChanges(s.repoRoot))
 				throw new Error(`in-place run needs a clean checkout: commit or stash your local changes first (${s.repoRoot})`);
-			const target = G.pushesInPlace(s.branch, s.base) ? `the PR target is \`${s.base}\`` : `\`${s.base}\` is the base branch, so nothing is pushed and no PR is opened`;
+			const target = G.pushesInPlace(s.branch, s.base, s.inPlaceBase)
+				? `the PR target is \`${s.base}\``
+				: `\`${s.branch}\` is the repository's base branch, so nothing is pushed and no PR is opened`;
 			this.log("info", `in-place on \`${s.branch}\``, `\`${plan.cwd}\` · diff base \`${s.baseRef}\` · ${target}`);
 			return;
 		}
@@ -677,12 +680,12 @@ export class Pipeline {
 		const cmdTemplate = await this.resolvePrCommand();
 		this.log("info", `PR ready: ${title}`, `${body}\n\n---\nCommits:\n\`\`\`\n${await G.commitLog(this.wt, s.baseRef as string)}\n\`\`\``);
 
-		// In-place runs never push the base branch itself.
-		if (s.inPlace && !G.pushesInPlace(s.branch as string, s.base as string)) {
+		// In-place runs never push a base branch — neither the PR target nor the repository's own default branch.
+		if (s.inPlace && !G.pushesInPlace(s.branch as string, s.base as string, s.inPlaceBase)) {
 			this.log(
 				"warn",
-				"in-place run on the base branch — nothing pushed",
-				`\`${s.branch}\` is the base branch \`${s.base}\`, so the run kept its commits local (no push, no PR). Work on a feature branch, or run with a worktree, for an automatic PR.`,
+				"in-place run on a base branch — nothing pushed",
+				`\`${s.branch}\` is a base branch, so the run kept its commits local (no push, no PR). Work on a feature branch, or run with a worktree, for an automatic PR.`,
 			);
 			return;
 		}

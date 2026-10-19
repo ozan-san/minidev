@@ -94,9 +94,12 @@ export async function headSha(repo: string): Promise<string | null> {
 	return gitTry(repo, ["rev-parse", "HEAD"]);
 }
 
-/** In-place runs push (and open a PR) only off the base branch — never straight onto it. */
-export function pushesInPlace(branch: string, base: string): boolean {
-	return branch !== base;
+/**
+ * In-place runs push (and open a PR) only off a base branch — never straight onto one. `defaultBase` is the
+ * repository's own default branch, which must not be pushed even when the run's PR target differs from it.
+ */
+export function pushesInPlace(branch: string, base: string, defaultBase?: string): boolean {
+	return branch !== base && branch !== defaultBase;
 }
 
 export async function ensureWorktree(repo: string, wt: string, branch: string, baseRef: string): Promise<"created" | "reused"> {
