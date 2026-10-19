@@ -1,7 +1,7 @@
 /**
  * minidev — ticket → PR pipeline for pi.
  *
- *   /minidev run [ISSUE-KEY | ticket.md | title]   start a run (opens an editor for ticket details)
+ *   /minidev run [--branch <base>] [--in-place|--worktree] [ISSUE-KEY | ticket.md | title]   start a run
  *   /minidev resume [KEY]                          continue a paused/failed run
  *   /minidev approve [KEY]                         approve a pending plan/PR gate and resume
  *   /minidev status                                list runs for this repo
@@ -22,6 +22,7 @@ import { loadConfig, PROJECT_CONFIG, ROLES, saveUserConfig, THINKING_LEVELS, USE
 import { closeHarnesses, readLedger, summarizeLedger } from "./harness.ts";
 import { mainRepoRoot } from "./git.ts";
 import { effectiveModel, Pipeline, removeWorktree, type LogEntry } from "./pipeline.ts";
+import { parseRunFlags } from "./run-flags.ts";
 import { listRuns, loadState, runDirFor, saveState, type RunState } from "./state.ts";
 import { ISSUE_KEY_RE, parseTicketText, resolveTicket, sanitizeKey, TICKET_TEMPLATE, type Ticket } from "./ticket.ts";
 import { Dashboard } from "./ui.ts";
@@ -128,7 +129,9 @@ export default function minidev(pi: ExtensionAPI) {
 		if (active) return ctx.ui.notify(`minidev: ${active.state.key} is running — /minidev stop first`, "warning");
 		const repoRoot = await repoOrFail(ctx);
 		if (!repoRoot) return;
-		const ticket = await intake(arg, ctx);
+		const flags = parseRunFlags(arg);
+		if (flags.unknown.length) ctx.ui.notify(`minidev: ignoring unknown flag(s) ${flags.unknown.join(", ")}`, "warning");
+		const ticket = await intake(flags.ticketArg, ctx);
 		if (!ticket) return ctx.ui.notify("minidev: no ticket given", "warning");
 		ticket.key = sanitizeKey(ticket.key);
 
@@ -152,6 +155,8 @@ export default function minidev(pi: ExtensionAPI) {
 			repoRoot,
 			repoName,
 			runDir,
+			base: flags.baseBranch,
+			inPlace: flags.inPlace,
 			stage: "workspace",
 			completed: [],
 			status: "running",
@@ -167,7 +172,8 @@ export default function minidev(pi: ExtensionAPI) {
 		};
 		saveState(state);
 		const models = ROLES.map((r) => `${r}=${effectiveModel(state, cfg, r).model.replace(/^openrouter\//, "")}`).join(" · ");
-		ctx.ui.notify(`minidev ${state.key}: "${state.title}" · budget ${fmtUsd(state.budgetUsd)}\n${models}`, "info");
+		const mode = (state.inPlace ?? cfg.git.inPlace) ? "in-place" : "worktree";
+		ctx.ui.notify(`minidev ${state.key}: "${state.title}" · ${mode}${state.base ? ` · base ${state.base}` : ""} · budget ${fmtUsd(state.budgetUsd)}\n${models}`, "info");
 		const done = start(state, ctx);
 		if (!ctx.hasUI) await done;
 	}
